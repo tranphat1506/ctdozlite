@@ -621,13 +621,13 @@ pub async fn import_mobile_backup_container(
         }
     }
 
-    let mut store = crate::store::MessageStore::open("zalo_history.db")?;
-    let temp_dir = std::env::temp_dir().join(format!("ctdozlite_sync_{}", crate::param_cipher::random_hex(8)));
-    let _ = std::fs::create_dir_all(&temp_dir);
-
     let my_uid = s.login.as_ref().map(|l| l.uin.clone()).unwrap_or_default();
     let my_uin: i64 = my_uid.parse().unwrap_or(0);
     let my_name = s.login.as_ref().map(|l| l.display_name.clone()).unwrap_or_else(|| "Tôi".into());
+
+    let db_path = crate::store::db_path_for_account(&my_uid);
+    let mut store = crate::store::MessageStore::open(&db_path)?;
+    let temp_dir = std::env::temp_dir().join(format!("ctdozlite_sync_{}", crate::param_cipher::random_hex(8)));
 
     let mut curr_offset = 0;
     let mut total_imported = 0;
