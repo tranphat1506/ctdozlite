@@ -1660,7 +1660,15 @@ impl ZaloGuiApp {
                         self.sticker_textures.remove(&key);
                         ctx.request_repaint();
                     }
-                    self.loading_stickers.remove(&key);
+                    // Keep the key in `loading_stickers`: renderers only fire a request when
+                    // `loading_stickers.insert(key)` returns true, so removing it here made a
+                    // broken URL (404, expired link, undecodable format) re-fetch on *every*
+                    // frame — one HTTP request per repaint per broken image. The image viewer
+                    // still offers a manual retry through its own `hd_` texture.
+                    self.loading_stickers.insert(key);
+                    self.status_msg =
+                        "Không tải được một hình ảnh (định dạng lạ hoặc liên kết đã hết hạn)"
+                            .into();
                 }
                 GuiEvent::StickerStoreLoaded(packs) => {
                     self.sticker_store_loading = false;
