@@ -7685,6 +7685,8 @@ pub enum MobileSyncControlEvent {
         batch_type: u8,
         is_last: bool,
     },
+    /// `act == "transfer_error"` with `error_code != 0`.
+    SyncError { message: String },
 }
 
 /// Extract `transfer_msg` / `syncmsgmb` / `transfer_sync2` events from a control payload.
@@ -7825,6 +7827,24 @@ pub fn extract_mobile_sync_controls(data_node: &Value) -> Vec<MobileSyncControlE
                         encrypted_key,
                         checksum,
                     });
+                }
+            }
+            "transfer_error" => {
+                let err_code = parsed_data
+                    .get("error_code")
+                    .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()))
+                    .unwrap_or(0);
+                let err_msg = parsed_data
+                    .get("error_msg")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if err_code != 0 {
+                    let msg = if !err_msg.is_empty() {
+                        err_msg.to_string()
+                    } else {
+                        format!("Mã lỗi #{err_code}")
+                    };
+                    out.push(MobileSyncControlEvent::SyncError { message: msg });
                 }
             }
             _ => {}

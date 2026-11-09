@@ -919,7 +919,12 @@ impl ZaloGuiApp {
         let Some((ref text, ts)) = self.toast_notice else {
             return;
         };
-        if ts.elapsed() > Duration::from_millis(2500) {
+        let display_duration = if text.contains("⚠️") || text.contains("Lỗi") || text.contains("thất bại") {
+            Duration::from_millis(8000)
+        } else {
+            Duration::from_millis(4000)
+        };
+        if ts.elapsed() > display_duration {
             self.toast_notice = None;
             return;
         }

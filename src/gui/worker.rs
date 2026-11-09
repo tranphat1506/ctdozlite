@@ -637,6 +637,12 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                         let _ = gui_tx_ws.send(GuiEvent::StatusUpdate(note));
                                                         ctx_ws.request_repaint();
                                                     }
+                                                    crate::chat::MobileSyncControlEvent::SyncError { message } => {
+                                                        let note = format!("⚠️ Lỗi từ điện thoại: {message}");
+                                                        crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
+                                                        let _ = gui_tx_ws.send(GuiEvent::StatusUpdate(note));
+                                                        ctx_ws.request_repaint();
+                                                    }
                                                     crate::chat::MobileSyncControlEvent::BackupReady {
                                                         url,
                                                         file_name,
@@ -879,6 +885,13 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                 let _ = gui_tx_ctrl.send(GuiEvent::StatusUpdate(note));
                                                 ctx_ctrl.request_repaint();
                                             }
+                                            crate::chat::MobileSyncControlEvent::SyncError { message } => {
+                                                let err = format!("⚠️ Điện thoại phản hồi lỗi đồng bộ: {message}");
+                                                eprintln!("[sync] {err}");
+                                                crate::history_sync::set_last_mobile_sync_status(Some(err.clone()));
+                                                let _ = gui_tx_ctrl.send(GuiEvent::StatusUpdate(err));
+                                                ctx_ctrl.request_repaint();
+                                            }
                                             crate::chat::MobileSyncControlEvent::BackupReady {
                                                 url,
                                                 file_name,
@@ -890,6 +903,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                 let ctx_sync = ctx_ctrl.clone();
                                                 tokio::spawn(async move {
                                                     let status_dl = format!("📥 Đang tải và giải mã gói đồng bộ tin nhắn ({file_name})…");
+                                                    eprintln!("[sync] {status_dl} URL={url}");
                                                     crate::history_sync::set_last_mobile_sync_status(Some(status_dl.clone()));
                                                     let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(status_dl));
                                                     ctx_sync.request_repaint();
@@ -897,6 +911,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                     match crate::history_sync::import_mobile_backup_container(&s_sync, &url, &encrypted_key).await {
                                                         Ok(count) => {
                                                              let note = format!("🎉 Đã giải mã & đồng bộ thành công {count} tin nhắn từ điện thoại vào ứng dụng!");
+                                                             eprintln!("[sync] {note}");
                                                              crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
                                                              let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(note));
                                                              let updated = crate::chat::load_threads_cache();
@@ -904,6 +919,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                          }
                                                          Err(e) => {
                                                              let err_note = format!("⚠️ Không thể giải mã gói đồng bộ ({file_name}): {e}");
+                                                             eprintln!("[sync] {err_note}");
                                                              crate::history_sync::set_last_mobile_sync_status(Some(err_note.clone()));
                                                              let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(err_note));
                                                          }
@@ -1770,6 +1786,12 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                         }
                                                         crate::chat::MobileSyncControlEvent::UserRejected => {
                                                             let note = "⚠️ Bạn đã từ chối yêu cầu đồng bộ tin nhắn trên điện thoại".to_string();
+                                                            crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
+                                                            let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(note));
+                                                            ctx_clone.request_repaint();
+                                                        }
+                                                        crate::chat::MobileSyncControlEvent::SyncError { message } => {
+                                                            let note = format!("⚠️ Lỗi từ điện thoại: {message}");
                                                             crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
                                                             let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(note));
                                                             ctx_clone.request_repaint();

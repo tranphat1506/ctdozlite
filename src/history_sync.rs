@@ -493,6 +493,7 @@ pub async fn import_mobile_backup_container(
     let sek = s.zpw_sek.clone().unwrap_or_default();
     let cookie_hdr = format!("zpw_sek={sek}; zpw_uin={uin}");
 
+    eprintln!("[sync] import_mobile_backup_container: downloading {url}...");
     let resp = s
         .http
         .get(url)
@@ -502,13 +503,13 @@ pub async fn import_mobile_backup_container(
         .await?;
 
     if !resp.status().is_success() {
-        anyhow::bail!("failed to download backup: HTTP {}", resp.status());
+        let err = format!("failed to download backup: HTTP {}", resp.status());
+        eprintln!("[sync] {err}");
+        anyhow::bail!("{err}");
     }
 
     let crypt_data = resp.bytes().await?;
-    if crypt_data.len() < 48 {
-        anyhow::bail!("backup file too small: {} bytes", crypt_data.len());
-    }
+    eprintln!("[sync] downloaded {} bytes. Decrypting AES container...", crypt_data.len());
 
     let hex_key: String = raw_key.iter().map(|b| format!("{:02X}", b)).collect();
     let key_32 = &hex_key.as_bytes()[..32];
@@ -743,6 +744,8 @@ pub async fn import_mobile_backup_container(
     let mut cached_threads = crate::chat::load_threads_cache();
     let _ = store.hydrate_threads(&mut cached_threads, 50);
     crate::chat::save_threads_cache(&cached_threads);
+
+    eprintln!("[sync] Imported {total_imported} messages into SQLite!");
 
     // Notify Zalo server and phone that snapshot is downloaded, dismissing mobile spinner
     let _ = crate::chat::clean_sync(s, &pub_key_b64).await;
