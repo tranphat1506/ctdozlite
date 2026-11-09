@@ -7519,6 +7519,8 @@ pub async fn send_seen_v2(
 /// Request mobile message sync (`pullMobileMsg` @ `app.asar`, cmd `12000`, `file` endpoint, #68, #73).
 /// Sends a wake-up/sync signal with a 2048-bit RSA SPKI DER public key to the user's phone Zalo client.
 pub async fn request_phone_sync(s: &Session, public_key: &str) -> Result<Value> {
+    // According to compact-app-pc.js: pullMobileMsg(publicKey, from_seq_id, cb, is_retry=0, min_seq_id=0, temp_key="")
+    // In manual sync on desktop, if no fresh temp_key is active, temp_key must be "" to avoid "temp key invalid".
     let temp_key = crate::history_sync::latest_mobile_temp_key();
     request_phone_sync_with_temp_key(s, public_key, &temp_key).await
 }

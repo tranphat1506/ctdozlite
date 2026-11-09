@@ -1058,7 +1058,13 @@ pub async fn poll_control_events(
     crate::chat::dispatch_file_done_controls(data_node);
     let mute_events = crate::chat::extract_mute_controls(data_node, ts);
     let (typing_events, seen_events) = crate::chat::extract_typing_and_seen_controls(data_node);
-    let sync_events = crate::chat::extract_mobile_sync_controls(data_node);
+    let sync_events = if is_initial_cursor {
+        // Drop stale backlog sync events on initial connection cursor so we don't try
+        // to decrypt outdated packages from previous sessions.
+        Vec::new()
+    } else {
+        crate::chat::extract_mobile_sync_controls(data_node)
+    };
     if is_initial_cursor {
         // First poll with cursor "1" syncs `lastActionId`, but preserve any fresh (< 45s) incoming
         // `request` / `group_request` invite so a call ringing right as the app opens is not dropped.
