@@ -1302,6 +1302,14 @@ impl ZaloGuiApp {
                             if self.settings.play_notification_sound {
                                 crate::media::play_notification_chime();
                             }
+                            if !is_focused {
+                                if let Some(ref popup) = self.incoming_popup {
+                                    crate::native_notifications::deliver_desktop_notification(
+                                        &popup.sender_name,
+                                        &popup.preview_text,
+                                    );
+                                }
+                            }
                             let total_unread: usize = self.unread_counts.values().sum();
                             let title = if total_unread > 0 {
                                 format!("({total_unread}) ctdozlite")

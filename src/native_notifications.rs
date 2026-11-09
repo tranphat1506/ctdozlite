@@ -178,6 +178,71 @@ pub async fn request_if_user_action(
     platform_invoke("--request", Duration::from_secs(120)).await
 }
 
+/// Deliver a native desktop notification for incoming messages.
+///
+/// On Linux: invokes `notify-send` asynchronously if available.
+/// On macOS: uses AppleScript notification.
+/// On Windows: fires a PowerShell balloon notification.
+pub fn deliver_desktop_notification(title: &str, body: &str) {
+    let clean_title = title.replace('\n', " ").replace('\r', "");
+    let clean_body = body.replace('\r', "");
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("notify-send")
+            .args([
+                "-a",
+                "ctdozlite",
+                "-i",
+                "dialog-information",
+                "-c",
+                "im.received",
+                &clean_title,
+                &clean_body,
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let esc_title = clean_title.replace('\\', "\\\\").replace('"', "\\\"");
+        let esc_body = clean_body.replace('\\', "\\\\").replace('"', "\\\"");
+        let script = format!("display notification \"{esc_body}\" with title \"{esc_title}\"");
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let esc_title = clean_title.replace('\'', "''");
+        let esc_body = clean_body.replace('\'', "''");
+        let ps_script = format!(
+            "Add-Type -AssemblyName System.Windows.Forms; \
+             $n = New-Object System.Windows.Forms.NotifyIcon; \
+             $n.Icon = [System.Drawing.SystemIcons]::Information; \
+             $n.BalloonTipTitle = '{esc_title}'; \
+             $n.BalloonTipText = '{esc_body}'; \
+             $n.Visible = $true; \
+             $n.ShowBalloonTip(4000); \
+             Start-Sleep -Seconds 4; \
+             $n.Dispose();"
+        );
+        let _ = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+}
+
 /// UI-owned sequence gate: at most one request is pending; stale completions are ignored.
 #[derive(Default)]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -211,6 +276,12 @@ impl AuthorizationState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deliver_desktop_notification_does_not_panic_on_any_input() {
+        deliver_desktop_notification("Sender\nName", "Hello\r\nWorld! <script>");
+        deliver_desktop_notification("", "");
+    }
 
     #[test]
     fn parser_accepts_all_statuses_and_rejects_unknown() {
