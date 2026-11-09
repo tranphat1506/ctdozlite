@@ -623,6 +623,7 @@ pub struct ZaloGuiApp {
     sticker_picker_open: bool,
     sticker_tab: StickerTab,
     sticker_textures: HashMap<String, TextureHandle>,
+    sticker_texture_order: std::collections::VecDeque<String>,
     loading_stickers: HashSet<String>,
     emoji_textures: HashMap<String, TextureHandle>,
     app_logo_texture: Option<TextureHandle>,
@@ -870,6 +871,7 @@ impl ZaloGuiApp {
             sticker_picker_open: false,
             sticker_tab: StickerTab::Popular,
             sticker_textures: HashMap::new(),
+            sticker_texture_order: std::collections::VecDeque::new(),
             loading_stickers: HashSet::new(),
             emoji_textures: load_default_emoji_textures(&cc.egui_ctx),
             app_logo_texture: load_app_logo_texture(&cc.egui_ctx),
@@ -1660,7 +1662,15 @@ impl ZaloGuiApp {
                 }
                 GuiEvent::StickerImageReady { key, image } => {
                     self.loading_stickers.remove(&key);
+                    const MAX_TEXTURE_CACHE: usize = 250;
+                    if self.sticker_textures.len() >= MAX_TEXTURE_CACHE {
+                        // Evict oldest texture that is not a permanent call stream or logo
+                        if let Some(oldest_key) = self.sticker_texture_order.pop_front() {
+                            self.sticker_textures.remove(&oldest_key);
+                        }
+                    }
                     let tex = ctx.load_texture(&key, image, TextureOptions::LINEAR);
+                    self.sticker_texture_order.push_back(key.clone());
                     self.sticker_textures.insert(key, tex);
                 }
                 GuiEvent::StickerImageFailed { key } => {

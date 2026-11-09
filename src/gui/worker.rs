@@ -257,6 +257,27 @@ pub(super) fn resp_error_code(resp: &serde_json::Value) -> Option<i64> {
         .filter(|c| *c != 0)
 }
 
+/// Clean up disk cache entries that exceed TTL or directory size limits.
+pub(super) fn clean_disk_sticker_cache() {
+    let cache_dir = std::path::Path::new("stickers_cache");
+    if let Ok(entries) = std::fs::read_dir(cache_dir) {
+        let max_age = std::time::Duration::from_secs(14 * 24 * 3600); // 14 days
+        let now = std::time::SystemTime::now();
+        for entry in entries.filter_map(std::result::Result::ok) {
+            let path = entry.path();
+            if let Ok(meta) = entry.metadata() {
+                if let Ok(modified) = meta.modified() {
+                    if let Ok(age) = now.duration_since(modified) {
+                        if age > max_age {
+                            let _ = std::fs::remove_file(path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Immediately decode any disk-cached sticker thumbnails (`stickers_cache/stk_{cid}_{sid}.png`)
 /// and push `GuiEvent::StickerImageReady` *before* sending sticker list metadata, returning any
 /// missing `(key, url, cache_path)` entries for concurrent network prefetching.
@@ -370,6 +391,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                     let s = session.lock().await.clone();
                     let _ = crate::login::get_server_info(&s).await;
                 }
+                tokio::task::spawn_blocking(clean_disk_sticker_cache);
                 // Message poll timer. It used to live in the GUI's update(), which forced a full
                 // repaint every 1.2 s just to fire it. The PollMessages handler skips while a
                 // long-poll is in flight and when logged out.
