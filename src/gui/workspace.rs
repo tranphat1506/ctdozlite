@@ -910,9 +910,7 @@ impl ZaloGuiApp {
                             let has_messages = !t.messages.is_empty()
                                 || !t.preview.trim().is_empty()
                                 || t.name.contains("Cloud của tôi")
-                                || self.settings.show_all_contacts
-                                || !query.is_empty()
-                                || *idx == self.selected_thread_index;
+                                || !query.is_empty();
 
                             pass_filter
                                 && not_hidden
@@ -940,11 +938,7 @@ impl ZaloGuiApp {
                                     t.is_group,
                                     &self.settings.pinned_threads,
                                 );
-                            let ts = t
-                                .messages
-                                .last()
-                                .map(|m| normalize_ts_ms(m.ts))
-                                .unwrap_or(0);
+                            let ts = t.sidebar_activity_ts();
                             (pinned, ts, i)
                         })
                         .collect();

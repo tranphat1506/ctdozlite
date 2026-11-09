@@ -2028,6 +2028,11 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         }
                                     }
                                     if is_group || is_send2me {
+                                        if is_group {
+                                            if let Ok(gh_resp) = crate::chat::get_group_history(&s, &group_id, 50).await {
+                                                crate::chat::merge_group_history(&mut t, &gh_resp);
+                                            }
+                                        }
                                         if let Ok(cm_resp) = crate::chat::get_cloud_messages(
                                             &s,
                                             &group_id,

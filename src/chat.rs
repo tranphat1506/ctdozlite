@@ -1369,18 +1369,25 @@ fn parse_thread(v: &Value) -> Option<Thread> {
         .unwrap_or_else(|| id.clone());
     let avatar = pick_str(v, &["avatar", "avt", "profile_avatar"]);
     let is_group = is_group_flag(v);
-    let time = v
+    let last_action_ts = v
         .get("lastActionTime")
         .and_then(|val| match val {
             Value::Number(n) => n.as_i64(),
             Value::String(s) => s.parse::<i64>().ok(),
             _ => None,
         })
-        .map(crate::clock::message_time)
-        .unwrap_or_default();
+        .unwrap_or(0);
+    let time = if last_action_ts > 0 {
+        crate::clock::message_time(last_action_ts)
+    } else {
+        String::new()
+    };
+
+    let mut presentation = SidebarPresentation::default();
+    presentation.last_message_ts = last_action_ts;
 
     Some(Thread {
-        presentation: Default::default(),
+        presentation,
         unread: Default::default(),
         id,
         name,
