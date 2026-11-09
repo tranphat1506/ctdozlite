@@ -1137,11 +1137,12 @@ impl ZaloGuiApp {
                                 );
 
                                 // Pin icon + Timestamp (top-right)
+                                let display_time = t.sidebar_timestamp(crate::login::unix_now() as i64 * 1000);
                                 let time_right = row_rect.right() - 9.0;
-                                if !t.time.is_empty() {
+                                if !display_time.is_empty() {
                                     let tw = ui.fonts(|f| {
                                         f.layout_no_wrap(
-                                            t.time.clone(),
+                                            display_time.clone(),
                                             FontId::proportional(11.0),
                                             pal.text_muted,
                                         )
@@ -1151,7 +1152,7 @@ impl ZaloGuiApp {
                                     ui.painter().text(
                                         Pos2::new(time_right, row_rect.top() + 13.5),
                                         egui::Align2::RIGHT_TOP,
-                                        &t.time,
+                                        &display_time,
                                         FontId::proportional(11.0),
                                         pal.text_muted,
                                     );
