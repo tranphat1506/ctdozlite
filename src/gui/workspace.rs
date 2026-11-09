@@ -891,7 +891,7 @@ impl ZaloGuiApp {
                 }
 
                 let search_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let mut filtered_indices: Vec<usize> = self
+                    let filtered_indices: Vec<usize> = self
                         .threads
                         .iter()
                         .enumerate()
@@ -924,40 +924,33 @@ impl ZaloGuiApp {
                         .map(|(i, _)| i)
                         .collect();
 
-                    filtered_indices.sort_by(|&a, &b| {
-                        let ta = &self.threads[a];
-                        let tb = &self.threads[b];
-                        let a_pinned = ta.name.contains("Cloud của tôi")
-                            || ta.presentation.pinned
-                            || self.settings.pinned_threads.contains(&ta.id)
-                            || crate::chat::is_pinned_in_list(
-                                &ta.id,
-                                ta.is_group,
-                                &self.settings.pinned_threads,
-                            );
-                        let b_pinned = tb.name.contains("Cloud của tôi")
-                            || tb.presentation.pinned
-                            || self.settings.pinned_threads.contains(&tb.id)
-                            || crate::chat::is_pinned_in_list(
-                                &tb.id,
-                                tb.is_group,
-                                &self.settings.pinned_threads,
-                            );
-                        if a_pinned != b_pinned {
-                            return b_pinned.cmp(&a_pinned);
-                        }
-                        let ts_a = ta
-                            .messages
-                            .last()
-                            .map(|m| normalize_ts_ms(m.ts))
-                            .unwrap_or(0);
-                        let ts_b = tb
-                            .messages
-                            .last()
-                            .map(|m| normalize_ts_ms(m.ts))
-                            .unwrap_or(0);
-                        ts_b.cmp(&ts_a)
-                    });
+                    // Compute the pinned flag and last timestamp once per thread.
+                    // The previous comparator re-read `pinned_threads` and the
+                    // message tail on every comparison, turning a cheap sort into
+                    // O(n log n) hash/lookup work on every frame.
+                    let mut sort_entries: Vec<(bool, i64, usize)> = filtered_indices
+                        .iter()
+                        .map(|&i| {
+                            let t = &self.threads[i];
+                            let pinned = t.name.contains("Cloud của tôi")
+                                || t.presentation.pinned
+                                || self.settings.pinned_threads.contains(&t.id)
+                                || crate::chat::is_pinned_in_list(
+                                    &t.id,
+                                    t.is_group,
+                                    &self.settings.pinned_threads,
+                                );
+                            let ts = t
+                                .messages
+                                .last()
+                                .map(|m| normalize_ts_ms(m.ts))
+                                .unwrap_or(0);
+                            (pinned, ts, i)
+                        })
+                        .collect();
+                    sidebar_sort_by_key(&mut sort_entries);
+                    let filtered_indices: Vec<usize> =
+                        sort_entries.into_iter().map(|(_, _, i)| i).collect();
 
                     let msg_hits: Vec<(usize, String, String, String, bool)> =
                         if query.chars().count() >= 2 {
@@ -3914,35 +3907,40 @@ impl ZaloGuiApp {
                                                 String::new()
                                             };
                                             let in_chat_folded = fold_vn_search(&in_chat_q);
-                                            let visible_indices: Vec<usize> = thread
-                                                .messages
-                                                .iter()
-                                                .enumerate()
-                                                .filter(|(_, m)| {
-                                                    (!only_starred || m.is_starred)
-                                                        && (in_chat_q.is_empty()
-                                                            || matches_vn_query(
-                                                                &m.text,
-                                                                &in_chat_q,
-                                                                &in_chat_folded,
-                                                            )
-                                                            || matches_vn_query(
-                                                                &m.sender,
-                                                                &in_chat_q,
-                                                                &in_chat_folded,
-                                                            ))
-                                                })
-                                                .map(|(i, _)| i)
-                                                .collect();
-                                            // Search and the starred filter still scan everything.
+                                            // Only build an index vector for every message when a
+                                            // filter is actually active. The common case renders
+                                            // the newest `render_limit` bubbles and must stay O(1)
+                                            // in the thread length: scanning the whole thread and
+                                            // allocating an index vector per frame dominated long
+                                            // conversations.
                                             let visible_indices: Vec<usize> =
                                                 if only_starred || !in_chat_q.is_empty() {
-                                                    visible_indices
+                                                    thread
+                                                        .messages
+                                                        .iter()
+                                                        .enumerate()
+                                                        .filter(|(_, m)| {
+                                                            (!only_starred || m.is_starred)
+                                                                && (in_chat_q.is_empty()
+                                                                    || matches_vn_query(
+                                                                        &m.text,
+                                                                        &in_chat_q,
+                                                                        &in_chat_folded,
+                                                                    )
+                                                                    || matches_vn_query(
+                                                                        &m.sender,
+                                                                        &in_chat_q,
+                                                                        &in_chat_folded,
+                                                                    ))
+                                                        })
+                                                        .map(|(i, _)| i)
+                                                        .collect()
                                                 } else {
-                                                    let skip = visible_indices
-                                                        .len()
-                                                        .saturating_sub(render_limit);
-                                                    visible_indices[skip..].to_vec()
+                                                    visible_message_window(
+                                                        thread.messages.len(),
+                                                        render_limit,
+                                                    )
+                                                    .collect()
                                                 };
                                             if visible_indices.is_empty() && !in_chat_q.is_empty() {
                                                 ui.vertical_centered(|ui| {
@@ -5605,6 +5603,59 @@ impl ZaloGuiApp {
             });
 
         chosen
+    }
+}
+
+/// Newest `limit` message indices for the unfiltered chat view.
+///
+/// Returns a range (not a filtered vector) so the render loop does not scan or
+/// allocate for the entire thread on every frame.
+fn visible_message_window(len: usize, limit: usize) -> std::ops::Range<usize> {
+    len.saturating_sub(limit)..len
+}
+
+/// Order sidebar entries: pinned threads first, then newest `last_ts`.
+///
+/// Stable so entries with an equal key keep their original order.
+fn sidebar_sort_by_key(entries: &mut [(bool, i64, usize)]) {
+    entries.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+}
+
+#[cfg(test)]
+mod hot_path_tests {
+    use super::*;
+
+    #[test]
+    fn visible_window_returns_newest_messages_without_scanning_the_thread() {
+        assert_eq!(
+            visible_message_window(10, 3).collect::<Vec<_>>(),
+            vec![7, 8, 9]
+        );
+        assert_eq!(
+            visible_message_window(3, 150).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert!(visible_message_window(0, 150).next().is_none());
+    }
+
+    #[test]
+    fn sidebar_entries_sort_pinned_first_then_newest() {
+        let mut entries = vec![(false, 10, 0), (true, 1, 1), (false, 30, 2), (true, 5, 3)];
+        sidebar_sort_by_key(&mut entries);
+        assert_eq!(
+            entries,
+            vec![(true, 5, 3), (true, 1, 1), (false, 30, 2), (false, 10, 0)]
+        );
+    }
+
+    #[test]
+    fn sidebar_sort_is_stable_for_equal_keys() {
+        let mut entries = vec![(false, 10, 0), (false, 10, 1), (false, 10, 2)];
+        sidebar_sort_by_key(&mut entries);
+        assert_eq!(
+            entries,
+            vec![(false, 10, 0), (false, 10, 1), (false, 10, 2)]
+        );
     }
 }
 

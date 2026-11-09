@@ -345,10 +345,25 @@ pub(super) fn matches_vn_query(haystack: &str, query_lower: &str, query_folded: 
     if query_lower.is_empty() {
         return true;
     }
-    if haystack.to_lowercase().contains(query_lower) {
+    // Fast path: most matches are plain ASCII. This avoids allocating a
+    // lowercased copy of `haystack` (and a folded copy on failure) for every
+    // message on every keystroke while in-chat search is active.
+    if contains_ignore_ascii_case(haystack, query_lower) {
         return true;
     }
     !query_folded.is_empty() && fold_vn_search(haystack).contains(query_folded)
+}
+
+/// ASCII case-insensitive substring check without allocating.
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    let needle = needle.as_bytes();
+    let haystack = haystack.as_bytes();
+    if needle.is_empty() {
+        return true;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
 fn paint_circular_image(
@@ -1149,4 +1164,34 @@ fn build_fonts(ctx: &egui::Context, with_cjk: bool) {
     mono.push("lucide_font".to_owned());
 
     ctx.set_fonts(fonts);
+}
+
+#[cfg(test)]
+mod search_match_tests {
+    use super::*;
+
+    fn matches(haystack: &str, query: &str) -> bool {
+        let lower = query.to_lowercase();
+        let folded = fold_vn_search(&lower);
+        matches_vn_query(haystack, &lower, &folded)
+    }
+
+    #[test]
+    fn ascii_match_is_case_insensitive() {
+        assert!(matches("Hello World", "hello"));
+        assert!(matches("Hello World", "WORLD"));
+        assert!(!matches("Hello World", "goodbye"));
+    }
+
+    #[test]
+    fn vietnamese_query_matches_accented_and_unaccented_text() {
+        assert!(matches("Nguyễn Văn An", "nguyen"));
+        assert!(matches("Nguyễn Văn An", "nguyễn"));
+        assert!(matches("Đã kết bạn", "da ket"));
+    }
+
+    #[test]
+    fn empty_query_matches_everything() {
+        assert!(matches("anything", ""));
+    }
 }
