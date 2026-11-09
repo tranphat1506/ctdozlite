@@ -2666,7 +2666,11 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         let fetch_url = crate::store::jxl_to_jpg_url(&url);
                                         let body = match client
                                             .get(&fetch_url)
-                                            .header("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
+                                            // The official Zalo client sends exactly
+                                            // `image/webp,image/apng,image/*,*/*;q=0.8`
+                                            // (`ClientFingerprint.imageAccept` in Olaz). It does not
+                                            // advertise AVIF, and this build cannot decode it.
+                                            .header("Accept", "image/webp,image/apng,image/*,*/*;q=0.8")
                                             .send()
                                             .await
                                         {
