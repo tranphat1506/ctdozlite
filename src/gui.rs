@@ -2568,6 +2568,88 @@ impl eframe::App for ZaloGuiApp {
 // Screen Renderers
 // ---------------------------------------------------------------------------
 
+/// Geometry for the responsive login card, in logical points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LoginLayout {
+    top_space: f32,
+    logo_side: f32,
+    title_size: f32,
+    card_width: f32,
+    horizontal_margin: f32,
+    qr_side: f32,
+}
+
+/// Fit the login card dynamically to BOTH the window's available width and height.
+///
+/// Ensures the entire QR card, title, status, and action buttons fit into the visible
+/// viewport without being cut off vertically or requiring unnecessary scrolling.
+fn login_layout(available_width: f32, available_height: f32) -> LoginLayout {
+    let top_space = (available_height * 0.03).clamp(8.0, 24.0);
+    let is_compact_h = available_height < 650.0;
+    let logo_side = if is_compact_h { 46.0 } else { 58.0 };
+    let title_size = if is_compact_h { 21.0 } else { 25.0 };
+
+    // Chrome inside & outside the card:
+    // Header text (~50) + Card Margins/Padding (~32) + Tabs (~36) + QR borders (~22) + Status (~18) + Button (~34)
+    let header_h = top_space + logo_side + 8.0 + title_size + 4.0 + 16.0 + 12.0;
+    let card_chrome_h = 36.0 + 10.0 + 20.0 + 16.0 + 10.0 + 34.0 + 28.0;
+    let max_qr_from_h = (available_height - header_h - card_chrome_h - 16.0).max(140.0);
+    let max_qr_from_w = (available_width - 80.0).max(140.0);
+
+    // QR code is scaled proportionally between 140px and 250px so it fits fully in 99% of window heights
+    let qr_side = max_qr_from_h.min(max_qr_from_w).clamp(140.0, 250.0);
+
+    // Card width dynamically frames the QR code nicely
+    let horizontal_margin = if available_width < 380.0 { 16.0 } else { 24.0 };
+    let card_width = (qr_side + 48.0).clamp(240.0, 360.0);
+
+    LoginLayout {
+        top_space,
+        logo_side,
+        title_size,
+        card_width,
+        horizontal_margin,
+        qr_side,
+    }
+}
+
+#[cfg(test)]
+mod login_layout_tests {
+    use super::*;
+
+    #[test]
+    fn card_fits_inside_the_window_gutter() {
+        for (w, h) in [
+            (480.0_f32, 500.0_f32),
+            (620.0, 600.0),
+            (900.0, 700.0),
+            (1440.0, 900.0),
+        ] {
+            let layout = login_layout(w, h);
+            let outer = layout.card_width + layout.horizontal_margin * 2.0;
+            assert!(outer <= w, "outer {outer} exceeds window {w}");
+            assert!(layout.qr_side <= layout.card_width);
+        }
+    }
+
+    #[test]
+    fn qr_adapts_to_height_to_prevent_vertical_overflow() {
+        let short_window = login_layout(1000.0, 480.0);
+        let tall_window = login_layout(1000.0, 800.0);
+        assert!(short_window.qr_side < tall_window.qr_side);
+        assert!(tall_window.qr_side <= 250.0);
+        assert!(short_window.qr_side >= 140.0);
+    }
+
+    #[test]
+    fn compact_height_scales_down_header_elements() {
+        let short_window = login_layout(800.0, 500.0);
+        let tall_window = login_layout(800.0, 750.0);
+        assert!(short_window.logo_side < tall_window.logo_side);
+        assert!(short_window.title_size < tall_window.title_size);
+    }
+}
+
 impl ZaloGuiApp {
     fn handle_frameless_resize(ctx: &egui::Context) {
         if ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
@@ -2928,215 +3010,230 @@ impl ZaloGuiApp {
     }
 
     fn render_login_screen(&mut self, ui: &mut egui::Ui, pal: &ThemePalette) {
-        ui.vertical_centered(|ui| {
-            let avail_h = ui.available_height();
-            ui.add_space((avail_h * 0.08).max(20.0));
-            if let Some(tex) = &self.app_logo_texture {
-                ui.image((tex.id(), Vec2::new(64.0, 64.0)));
-                ui.add_space(10.0);
-            }
-            ui.label(
-                RichText::new("Đăng nhập Zalo")
-                    .color(pal.primary)
-                    .size(26.0)
-                    .strong(),
-            );
-            ui.add_space(4.0);
-            ui.label(
-                RichText::new("Khởi chạy nhẹ, bảo mật và đồng bộ tin nhắn thời gian thực")
-                    .color(pal.text_secondary)
-                    .size(13.5),
-            );
-            ui.add_space(18.0);
+        let avail_w = ui.available_width();
+        let avail_h = ui.available_height();
+        let layout = login_layout(avail_w, avail_h);
+        let card_w = layout.card_width;
+        let qr_side = layout.qr_side;
+        let logo_side = layout.logo_side;
+        let title_size = layout.title_size;
+        let horizontal_margin = layout.horizontal_margin;
+        let top_space = layout.top_space;
 
-            egui::Frame::none()
-                .fill(pal.bg_elevated)
-                .rounding(Rounding::same(16.0))
-                .stroke(Stroke::new(1.0_f32, pal.border))
-                .inner_margin(Margin::symmetric(28.0, 24.0))
-                .show(ui, |ui| {
-                    ui.set_width(360.0);
-                    ui.vertical_centered(|ui| {
-                        // Segmented Tab Switcher
-                        egui::Frame::none()
-                            .fill(pal.bg_input)
-                            .rounding(Rounding::same(10.0))
-                            .inner_margin(Margin::same(4.0))
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    let tab_w = (ui.available_width() - 8.0) / 2.0;
-                                    for (tab, title) in [
-                                        (LoginTab::QrCode, "Quét mã QR"),
-                                        (LoginTab::Password, "Số điện thoại"),
-                                    ] {
-                                        let active = self.login_tab == tab;
-                                        let btn = egui::Button::new(
-                                            RichText::new(title)
-                                                .size(13.0)
-                                                .color(if active {
-                                                    Color32::WHITE
+        // A short window would otherwise clip the card; let it scroll instead.
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(top_space);
+                    if let Some(tex) = &self.app_logo_texture {
+                        ui.image((tex.id(), Vec2::splat(logo_side)));
+                        ui.add_space(8.0);
+                    }
+                    ui.label(
+                        RichText::new("Đăng nhập Zalo")
+                            .color(pal.primary)
+                            .size(title_size)
+                            .strong(),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new("Khởi chạy nhẹ, bảo mật và đồng bộ tin nhắn thời gian thực")
+                            .color(pal.text_secondary)
+                            .size(13.0),
+                    );
+                    ui.add_space(12.0);
+
+                    egui::Frame::none()
+                        .fill(pal.bg_elevated)
+                        .rounding(Rounding::same(16.0))
+                        .stroke(Stroke::new(1.0_f32, pal.border))
+                        .inner_margin(Margin::symmetric(horizontal_margin, 20.0))
+                        .show(ui, |ui| {
+                            ui.set_width(card_w);
+                            ui.vertical_centered(|ui| {
+                                // Segmented Tab Switcher
+                                egui::Frame::none()
+                                    .fill(pal.bg_input)
+                                    .rounding(Rounding::same(10.0))
+                                    .inner_margin(Margin::same(4.0))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            let tab_w = (ui.available_width() - 8.0) / 2.0;
+                                            for (tab, title) in [
+                                                (LoginTab::QrCode, "Quét mã QR"),
+                                                (LoginTab::Password, "Số điện thoại"),
+                                            ] {
+                                                let active = self.login_tab == tab;
+                                                let btn = egui::Button::new(
+                                                    RichText::new(title)
+                                                        .size(13.0)
+                                                        .color(if active {
+                                                            Color32::WHITE
+                                                        } else {
+                                                            pal.text_secondary
+                                                        })
+                                                        .strong(),
+                                                )
+                                                .fill(if active {
+                                                    pal.primary
                                                 } else {
-                                                    pal.text_secondary
+                                                    Color32::TRANSPARENT
                                                 })
+                                                .stroke(Stroke::NONE)
+                                                .rounding(Rounding::same(7.0))
+                                                .min_size(Vec2::new(tab_w, 32.0));
+
+                                                if ui
+                                                    .add(btn)
+                                                    .on_hover_cursor(CursorIcon::PointingHand)
+                                                    .clicked()
+                                                {
+                                                    self.login_tab = tab;
+                                                }
+                                            }
+                                        });
+                                    });
+
+                                ui.add_space(18.0);
+
+                                match self.login_tab {
+                                    LoginTab::QrCode => {
+                                        if let Some(tex) = &self.qr_texture {
+                                            egui::Frame::none()
+                                                .fill(Color32::WHITE)
+                                                .rounding(Rounding::same(12.0))
+                                                .stroke(Stroke::new(1.0_f32, pal.border))
+                                                .inner_margin(Margin::same(14.0))
+                                                .show(ui, |ui| {
+                                                    ui.image((tex.id(), Vec2::splat(qr_side)));
+                                                });
+                                        } else {
+                                            let placeholder = qr_side + 28.0;
+                                            let (rect, _) = ui.allocate_exact_size(
+                                                Vec2::splat(placeholder),
+                                                Sense::hover(),
+                                            );
+                                            ui.painter().rect_filled(
+                                                rect,
+                                                Rounding::same(12.0),
+                                                pal.bg_input,
+                                            );
+                                            ui.painter().rect_stroke(
+                                                rect,
+                                                Rounding::same(12.0),
+                                                Stroke::new(1.0_f32, pal.border),
+                                            );
+                                            ui.painter().text(
+                                                rect.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                "Đang tải mã QR…",
+                                                FontId::proportional(14.5),
+                                                pal.text_secondary,
+                                            );
+                                        }
+
+                                        ui.add_space(14.0);
+                                        ui.label(
+                                            RichText::new(&self.qr_status)
+                                                .color(pal.text_primary)
+                                                .size(13.5),
+                                        );
+                                        ui.add_space(12.0);
+
+                                        let refresh_btn = egui::Button::new(
+                                            RichText::new("Tạo / Làm mới mã QR")
+                                                .size(13.5)
+                                                .color(Color32::WHITE)
                                                 .strong(),
                                         )
-                                        .fill(if active {
-                                            pal.primary
-                                        } else {
-                                            Color32::TRANSPARENT
-                                        })
-                                        .stroke(Stroke::NONE)
-                                        .rounding(Rounding::same(7.0))
-                                        .min_size(Vec2::new(tab_w, 32.0));
+                                        .fill(pal.primary)
+                                        .rounding(Rounding::same(8.0))
+                                        .min_size(Vec2::new(200.0_f32.min(card_w), 36.0));
 
                                         if ui
-                                            .add(btn)
+                                            .add(refresh_btn)
                                             .on_hover_cursor(CursorIcon::PointingHand)
                                             .clicked()
                                         {
-                                            self.login_tab = tab;
+                                            self.login_in_progress = true;
+                                            self.qr_status = "Đang xin mã QR…".into();
+                                            if let Some(tx) = WORKER_TX.get() {
+                                                let _ = tx.send(WorkerCmd::RequestQr);
+                                            }
                                         }
                                     }
-                                });
-                            });
+                                    LoginTab::Password => {
+                                        ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                                            ui.label(
+                                                RichText::new("Số điện thoại")
+                                                    .size(13.0)
+                                                    .color(pal.text_secondary)
+                                                    .strong(),
+                                            );
+                                            ui.add_space(4.0);
+                                            ui.add_sized(
+                                                [ui.available_width(), 34.0],
+                                                egui::TextEdit::singleline(&mut self.phone_input)
+                                                    .hint_text("Ví dụ: 0912345678"),
+                                            );
+                                            ui.add_space(12.0);
 
-                        ui.add_space(18.0);
+                                            ui.label(
+                                                RichText::new("Mật khẩu")
+                                                    .size(13.0)
+                                                    .color(pal.text_secondary)
+                                                    .strong(),
+                                            );
+                                            ui.add_space(4.0);
+                                            ui.add_sized(
+                                                [ui.available_width(), 34.0],
+                                                egui::TextEdit::singleline(&mut self.password_input)
+                                                    .password(true)
+                                                    .hint_text("Nhập mật khẩu Zalo"),
+                                            );
+                                            ui.add_space(16.0);
 
-                        match self.login_tab {
-                            LoginTab::QrCode => {
-                                if let Some(tex) = &self.qr_texture {
-                                    egui::Frame::none()
-                                        .fill(Color32::WHITE)
-                                        .rounding(Rounding::same(12.0))
-                                        .stroke(Stroke::new(1.0_f32, pal.border))
-                                        .inner_margin(Margin::same(14.0))
-                                        .show(ui, |ui| {
-                                            ui.image((tex.id(), Vec2::new(240.0, 240.0)));
+                                            if !self.login_status_msg.is_empty() {
+                                                ui.label(
+                                                    RichText::new(&self.login_status_msg)
+                                                        .color(pal.danger)
+                                                        .size(12.5),
+                                                );
+                                                ui.add_space(8.0);
+                                            }
+
+                                            let btn = egui::Button::new(
+                                                RichText::new("Đăng nhập")
+                                                    .color(Color32::WHITE)
+                                                    .size(14.0)
+                                                    .strong(),
+                                            )
+                                            .fill(pal.primary)
+                                            .rounding(Rounding::same(8.0))
+                                            .min_size(Vec2::new(ui.available_width(), 38.0));
+
+                                            if ui
+                                                .add_enabled(!self.login_in_progress, btn)
+                                                .on_hover_cursor(CursorIcon::PointingHand)
+                                                .clicked()
+                                            {
+                                                self.login_in_progress = true;
+                                                self.login_status_msg = "Đang kết nối…".into();
+                                                if let Some(tx) = WORKER_TX.get() {
+                                                    let _ = tx.send(WorkerCmd::LoginPassword {
+                                                        phone: self.phone_input.clone(),
+                                                        pass: self.password_input.clone(),
+                                                    });
+                                                }
+                                            }
                                         });
-                                } else {
-                                    let (rect, _) = ui.allocate_exact_size(
-                                        Vec2::new(268.0, 268.0),
-                                        Sense::hover(),
-                                    );
-                                    ui.painter().rect_filled(
-                                        rect,
-                                        Rounding::same(12.0),
-                                        pal.bg_input,
-                                    );
-                                    ui.painter().rect_stroke(
-                                        rect,
-                                        Rounding::same(12.0),
-                                        Stroke::new(1.0_f32, pal.border),
-                                    );
-                                    ui.painter().text(
-                                        rect.center(),
-                                        egui::Align2::CENTER_CENTER,
-                                        "Đang tải mã QR…",
-                                        FontId::proportional(14.5),
-                                        pal.text_secondary,
-                                    );
-                                }
-
-                                ui.add_space(14.0);
-                                ui.label(
-                                    RichText::new(&self.qr_status)
-                                        .color(pal.text_primary)
-                                        .size(13.5),
-                                );
-                                ui.add_space(12.0);
-
-                                let refresh_btn = egui::Button::new(
-                                    RichText::new("Tạo / Làm mới mã QR")
-                                        .size(13.5)
-                                        .color(Color32::WHITE)
-                                        .strong(),
-                                )
-                                .fill(pal.primary)
-                                .rounding(Rounding::same(8.0))
-                                .min_size(Vec2::new(200.0, 36.0));
-
-                                if ui
-                                    .add(refresh_btn)
-                                    .on_hover_cursor(CursorIcon::PointingHand)
-                                    .clicked()
-                                {
-                                    self.login_in_progress = true;
-                                    self.qr_status = "Đang xin mã QR…".into();
-                                    if let Some(tx) = WORKER_TX.get() {
-                                        let _ = tx.send(WorkerCmd::RequestQr);
                                     }
                                 }
-                            }
-                            LoginTab::Password => {
-                                ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                                    ui.label(
-                                        RichText::new("Số điện thoại")
-                                            .size(13.0)
-                                            .color(pal.text_secondary)
-                                            .strong(),
-                                    );
-                                    ui.add_space(4.0);
-                                    ui.add_sized(
-                                        [ui.available_width(), 34.0],
-                                        egui::TextEdit::singleline(&mut self.phone_input)
-                                            .hint_text("Ví dụ: 0912345678"),
-                                    );
-                                    ui.add_space(12.0);
-
-                                    ui.label(
-                                        RichText::new("Mật khẩu")
-                                            .size(13.0)
-                                            .color(pal.text_secondary)
-                                            .strong(),
-                                    );
-                                    ui.add_space(4.0);
-                                    ui.add_sized(
-                                        [ui.available_width(), 34.0],
-                                        egui::TextEdit::singleline(&mut self.password_input)
-                                            .password(true)
-                                            .hint_text("Nhập mật khẩu Zalo"),
-                                    );
-                                    ui.add_space(16.0);
-
-                                    if !self.login_status_msg.is_empty() {
-                                        ui.label(
-                                            RichText::new(&self.login_status_msg)
-                                                .color(pal.danger)
-                                                .size(12.5),
-                                        );
-                                        ui.add_space(8.0);
-                                    }
-
-                                    let btn = egui::Button::new(
-                                        RichText::new("Đăng nhập")
-                                            .color(Color32::WHITE)
-                                            .size(14.0)
-                                            .strong(),
-                                    )
-                                    .fill(pal.primary)
-                                    .rounding(Rounding::same(8.0))
-                                    .min_size(Vec2::new(ui.available_width(), 38.0));
-
-                                    if ui
-                                        .add_enabled(!self.login_in_progress, btn)
-                                        .on_hover_cursor(CursorIcon::PointingHand)
-                                        .clicked()
-                                    {
-                                        self.login_in_progress = true;
-                                        self.login_status_msg = "Đang kết nối…".into();
-                                        if let Some(tx) = WORKER_TX.get() {
-                                            let _ = tx.send(WorkerCmd::LoginPassword {
-                                                phone: self.phone_input.clone(),
-                                                pass: self.password_input.clone(),
-                                            });
-                                        }
-                                    }
-                                });
-                            }
-                        }
-                    });
+                            });
+                        });
                 });
-        });
+            });
     }
 
     fn show_toast(&mut self, msg: impl Into<String>) {
