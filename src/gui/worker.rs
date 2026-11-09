@@ -911,7 +911,62 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                     ctx_sync.request_repaint();
                                                 });
                                             }
-                                            _ => {}
+                                            crate::chat::MobileSyncControlEvent::SyncV2Batch {
+                                                url,
+                                                sync_id,
+                                                batch_type,
+                                                is_last: _,
+                                            } => {
+                                                let s_sync = s_snap.clone();
+                                                let gui_tx_sync = gui_tx_ctrl.clone();
+                                                let ctx_sync = ctx_ctrl.clone();
+                                                tokio::spawn(async move {
+                                                    if batch_type == 2 {
+                                                        let note = "📥 Đang giải mã thông tin phiên đồng bộ từ điện thoại…".to_string();
+                                                        crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
+                                                        let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(note));
+                                                        ctx_sync.request_repaint();
+                                                        match crate::history_sync::import_sync_v2_meta(&s_sync, &url).await {
+                                                            Ok(meta) => {
+                                                                crate::history_sync::record_sync_v2_session(&sync_id, &meta.session_id);
+                                                            }
+                                                            Err(e) => {
+                                                                let err = format!("⚠️ Lỗi giải mã phiên Sync v2 ({sync_id}): {e}");
+                                                                crate::history_sync::set_last_mobile_sync_status(Some(err.clone()));
+                                                                let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(err));
+                                                            }
+                                                        }
+                                                    } else if batch_type == 1 {
+                                                        if !crate::history_sync::has_sync_v2_session(&sync_id) {
+                                                            let err = format!("⚠️ Gói Sync v2 ({sync_id}) tới trước metadata — bỏ qua, chờ batch meta");
+                                                            crate::history_sync::set_last_mobile_sync_status(Some(err.clone()));
+                                                            let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(err));
+                                                            ctx_sync.request_repaint();
+                                                            return;
+                                                        }
+                                                        let note = "📥 Đang tải và giải mã gói tin nhắn từ điện thoại…".to_string();
+                                                        crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
+                                                        let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(note));
+                                                        ctx_sync.request_repaint();
+
+                                                        match crate::history_sync::import_sync_v2_messages(&s_sync, &url).await {
+                                                            Ok(count) => {
+                                                                let fin = format!("🎉 Đã giải mã & đồng bộ thành công {count} tin nhắn từ điện thoại vào ứng dụng!");
+                                                                crate::history_sync::set_last_mobile_sync_status(Some(fin.clone()));
+                                                                let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(fin));
+                                                                let updated = crate::chat::load_threads_cache();
+                                                                let _ = gui_tx_sync.send(GuiEvent::ThreadsUpdated(updated));
+                                                            }
+                                                            Err(e) => {
+                                                                let err = format!("⚠️ Lỗi giải mã tin nhắn Sync v2 ({sync_id}): {e}");
+                                                                crate::history_sync::set_last_mobile_sync_status(Some(err.clone()));
+                                                                let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(err));
+                                                            }
+                                                        }
+                                                        ctx_sync.request_repaint();
+                                                    }
+                                                });
+                                            }
                                         }
                                     }
                                 } else {

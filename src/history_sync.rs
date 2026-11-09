@@ -116,35 +116,70 @@ pub fn last_mobile_sync_status() -> Option<String> {
 static CURRENT_SYNC_KEYS: std::sync::Mutex<Option<(rsa::RsaPrivateKey, String)>> =
     std::sync::Mutex::new(None);
 
+/// Path to store the active session RSA sync key pair to persist across restarts.
+fn sync_rsa_key_path() -> std::path::PathBuf {
+    std::path::PathBuf::from("accounts/sync_rsa_active.der")
+}
+
 /// Retrieve the active RSA 2048 keys used for mobile sync decryption without consuming them.
 pub fn get_sync_keys() -> Option<(rsa::RsaPrivateKey, String)> {
-    CURRENT_SYNC_KEYS.lock().ok().and_then(|g| g.clone())
+    if let Ok(g) = CURRENT_SYNC_KEYS.lock() {
+        if let Some(ref pair) = *g {
+            return Some(pair.clone());
+        }
+    }
+    // Fall back to reading persisted RSA key from disk
+    use rsa::pkcs8::{DecodePrivateKey, EncodePublicKey};
+    use base64::Engine;
+    if let Ok(bytes) = std::fs::read(sync_rsa_key_path()) {
+        if let Ok(priv_key) = rsa::RsaPrivateKey::from_pkcs8_der(&bytes) {
+            let pub_key = rsa::RsaPublicKey::from(&priv_key);
+            if let Ok(der) = pub_key.to_public_key_der() {
+                let b64 = base64::engine::general_purpose::STANDARD.encode(der.as_bytes());
+                if let Ok(mut g) = CURRENT_SYNC_KEYS.lock() {
+                    *g = Some((priv_key.clone(), b64.clone()));
+                }
+                return Some((priv_key, b64));
+            }
+        }
+    }
+    None
 }
 
 /// Retrieve the active RSA 2048 public key.
 pub fn get_sync_public_key() -> Option<String> {
-    CURRENT_SYNC_KEYS.lock().ok().and_then(|g| g.as_ref().map(|(_, pub_k)| pub_k.clone()))
+    get_sync_keys().map(|(_, pub_k)| pub_k)
 }
+
 /// Clear the active sync keys once sync is finalized.
 pub fn clear_sync_keys() {
     if let Ok(mut g) = CURRENT_SYNC_KEYS.lock() {
         *g = None;
     }
+    let _ = std::fs::remove_file(sync_rsa_key_path());
 }
 
-/// Generate a genuine 2048-bit RSA SubjectPublicKeyInfo (`SPKI`) DER Base64 key
-/// (`294 bytes` -> `392 chars` Base64 starting with `MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA...`),
-/// matching `sync-message-key-generator` (`main-startup.js:598226`) for `pullMobileMsg` (`cmd 12000`).
+/// Generate or reuse a genuine 2048-bit RSA SubjectPublicKeyInfo (`SPKI`) DER Base64 key.
 pub fn generate_sync_public_key() -> String {
-    use rsa::pkcs8::EncodePublicKey;
+    use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
     use rsa::{RsaPrivateKey, RsaPublicKey};
     use base64::Engine;
+
+    // Reuse existing key if one was generated recently and not completed
+    if let Some((_, pub_k)) = get_sync_keys() {
+        return pub_k;
+    }
 
     let mut rng = rsa::rand_core::OsRng;
     if let Ok(priv_key) = RsaPrivateKey::new(&mut rng, 2048) {
         let pub_key = RsaPublicKey::from(&priv_key);
         if let Ok(der) = pub_key.to_public_key_der() {
             let b64 = base64::engine::general_purpose::STANDARD.encode(der.as_bytes());
+            // Persist private key to disk to withstand restarts
+            if let Ok(priv_der) = priv_key.to_pkcs8_der() {
+                let _ = std::fs::create_dir_all("accounts");
+                let _ = std::fs::write(sync_rsa_key_path(), priv_der.as_bytes());
+            }
             if let Ok(mut g) = CURRENT_SYNC_KEYS.lock() {
                 *g = Some((priv_key, b64.clone()));
             }
@@ -1152,7 +1187,9 @@ mod tests {
     #[test]
     fn generate_sync_public_key_produces_valid_rsa2048_spki_der_base64() {
         use base64::Engine;
+        clear_sync_keys();
         let k1 = generate_sync_public_key();
+        clear_sync_keys();
         let k2 = generate_sync_public_key();
         assert_ne!(k1, k2);
         assert!(

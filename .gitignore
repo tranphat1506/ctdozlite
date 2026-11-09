@@ -92,3 +92,4 @@ Thumbs.db
 
 # Sync v2 private keys (NEVER COMMIT)
 sync_v2_keys.json
+re-notes/official-v26/
