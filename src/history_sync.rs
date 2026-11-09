@@ -534,9 +534,9 @@ pub async fn import_mobile_backup_container(
         }
     }
 
-    let magic = decrypted.get(..7).unwrap_or_default();
-    if magic != b"ZDB4.0\0" {
-        anyhow::bail!("invalid backup container magic: {:?}", magic);
+    let magic = decrypted.get(..6).unwrap_or_default();
+    if magic != b"ZDB4.0" {
+        anyhow::bail!("invalid backup container magic: {:?}", decrypted.get(..7));
     }
 
     let mut offset = 14;
