@@ -408,6 +408,7 @@ impl crate::session::Session {
 /// Nạp dữ liệu bài viết thật từ bảng `timeline_feed_1` trong cơ sở dữ liệu SQLite cục bộ
 pub fn load_real_timeline_from_sqlite(db_path: &str, target_uid: &str) -> Result<Vec<FeedItem>> {
     let conn = rusqlite::Connection::open(db_path)?;
+    crate::store::configure_connection(&conn)?;
     // Kiểm tra xem bảng timeline_feed_1 có tồn tại trong database này không
     let table_exists: bool = conn
         .query_row(

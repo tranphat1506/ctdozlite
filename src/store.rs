@@ -46,6 +46,23 @@ pub fn db_path_for_account(uin: &str) -> String {
     }
 }
 
+/// Apply the connection-scoped pragmas required by
+/// `docs/standards/database-and-migrations.md` §2.
+///
+/// WAL lets the worker write while the GUI/TUI/MCP read from their own connections;
+/// `synchronous = NORMAL` keeps chat-history durability without an fsync per statement;
+/// `busy_timeout` turns an instant `SQLITE_BUSY` into a bounded wait. Every connection
+/// opened outside `MessageStore::open` must call this too.
+pub(crate) fn configure_connection(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = NORMAL;
+         PRAGMA busy_timeout = 5000;
+         PRAGMA foreign_keys = ON;",
+    )?;
+    Ok(())
+}
+
 impl MessageStore {
     /// Messages per thread loaded at startup / on refresh. The list only needs the newest one
     /// for ordering and preview; opening a thread reads deeper (`LoadGroupHistory`).
@@ -58,6 +75,7 @@ impl MessageStore {
         } else {
             Connection::open(path)?
         };
+        configure_connection(&conn)?;
 
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS messages (
@@ -1653,6 +1671,67 @@ fn import_official_zalo_pc_db(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_applies_required_connection_pragmas() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("ctdozlite-pragmas-{nonce}.db"));
+        let path_str = path.to_str().unwrap().to_string();
+
+        {
+            let store = MessageStore::open(&path_str).unwrap();
+            let journal_mode: String = store
+                .conn
+                .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+                .unwrap();
+            let synchronous: i64 = store
+                .conn
+                .query_row("PRAGMA synchronous", [], |r| r.get(0))
+                .unwrap();
+            let busy_timeout: i64 = store
+                .conn
+                .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+                .unwrap();
+            let foreign_keys: i64 = store
+                .conn
+                .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+            assert_eq!(synchronous, 1, "NORMAL");
+            assert_eq!(busy_timeout, 5000);
+            assert_eq!(foreign_keys, 1);
+
+            // A second connection must see the same WAL journal and be able to write.
+            let mut second = MessageStore::open(&path_str).unwrap();
+            second
+                .upsert_thread(&StoredThread {
+                    thread_id: "thread-1".into(),
+                    name: "Example".into(),
+                    is_group: false,
+                    last_ts: 1,
+                    last_read_msg_id: String::new(),
+                })
+                .unwrap();
+        }
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{path_str}-wal"));
+        let _ = std::fs::remove_file(format!("{path_str}-shm"));
+    }
+
+    #[test]
+    fn memory_database_still_opens_with_pragmas() {
+        // `journal_mode = WAL` is a no-op for `:memory:`; it must not fail.
+        let store = MessageStore::open(":memory:").unwrap();
+        let busy_timeout: i64 = store
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(busy_timeout, 5000);
+    }
 
     #[test]
     fn local_time_when_hydrating_seconds_and_milliseconds() {
