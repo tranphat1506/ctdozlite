@@ -1750,7 +1750,7 @@ impl ZaloGuiApp {
                         .threads
                         .get(resolved_idx)
                         .map_or(true, |t| t.messages.is_empty());
-                    if (is_group || is_cloud) && needs_history {
+                    if needs_history {
                         if let Some(tx) = WORKER_TX.get() {
                             let _ = tx.send(WorkerCmd::LoadGroupHistory {
                                 group_id: tid,
