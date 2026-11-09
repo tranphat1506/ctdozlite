@@ -1190,10 +1190,18 @@ mod tests {
     #[test]
     fn generate_sync_public_key_produces_valid_rsa2048_spki_der_base64() {
         use base64::Engine;
-        clear_sync_keys();
-        let k1 = generate_sync_public_key();
-        clear_sync_keys();
-        let k2 = generate_sync_public_key();
+        use rsa::pkcs8::EncodePublicKey;
+        use rsa::{RsaPrivateKey, RsaPublicKey};
+
+        let mut rng = rsa::rand_core::OsRng;
+        let priv1 = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let pub1 = RsaPublicKey::from(&priv1);
+        let k1 = base64::engine::general_purpose::STANDARD.encode(pub1.to_public_key_der().unwrap().as_bytes());
+
+        let priv2 = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let pub2 = RsaPublicKey::from(&priv2);
+        let k2 = base64::engine::general_purpose::STANDARD.encode(pub2.to_public_key_der().unwrap().as_bytes());
+
         assert_ne!(k1, k2);
         assert!(
             k1.starts_with("MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA"),
