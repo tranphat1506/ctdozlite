@@ -589,8 +589,8 @@ pub async fn import_mobile_backup_container(
     let temp_dir = std::env::temp_dir().join(format!("ctdozlite_sync_{}", crate::param_cipher::random_hex(8)));
     let _ = std::fs::create_dir_all(&temp_dir);
 
-    let my_uin = 435550501_i64;
     let my_uid = s.login.as_ref().map(|l| l.uin.clone()).unwrap_or_default();
+    let my_uin: i64 = my_uid.parse().unwrap_or(0);
     let my_name = s.login.as_ref().map(|l| l.display_name.clone()).unwrap_or_else(|| "Tôi".into());
 
     let mut curr_offset = 0;
