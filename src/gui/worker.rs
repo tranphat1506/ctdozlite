@@ -831,7 +831,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                     let mut st = cps.lock().await;
                                     crate::call::poll_control_events(&s_snap, &mut st).await
                                 };
-                                if let Ok((events, mute_evs, typing_evs, seen_evs)) = ctrl_res {
+                                if let Ok((events, mute_evs, typing_evs, seen_evs, sync_evs)) = ctrl_res {
                                     for ev in events {
                                         cb.handle_control_event(ev);
                                     }
@@ -849,6 +849,70 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                         let _ = gui_tx_ctrl
                                             .send(GuiEvent::SeenEventsReceived(seen_evs));
                                         ctx_ctrl.request_repaint();
+                                    }
+                                    for sync_ev in sync_evs {
+                                        match sync_ev {
+                                            crate::chat::MobileSyncControlEvent::TransferAfterLogin { temp_key } => {
+                                                crate::history_sync::set_latest_mobile_temp_key(&temp_key);
+                                            }
+                                            crate::chat::MobileSyncControlEvent::WaitingConfirmOnPhone { .. } => {
+                                                let note = "📲 Đang chờ bạn bấm 'Đồng bộ' trên màn hình Zalo điện thoại…".to_string();
+                                                crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
+                                                let _ = gui_tx_ctrl.send(GuiEvent::StatusUpdate(note));
+                                                ctx_ctrl.request_repaint();
+                                            }
+                                            crate::chat::MobileSyncControlEvent::MobileBusyRestoring => {
+                                                let note = "⏳ Điện thoại đang nén và chuẩn bị dữ liệu tin nhắn…".to_string();
+                                                crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
+                                                let _ = gui_tx_ctrl.send(GuiEvent::StatusUpdate(note));
+                                                ctx_ctrl.request_repaint();
+                                            }
+                                            crate::chat::MobileSyncControlEvent::UserConfirmed => {
+                                                let note = "📲 Điện thoại đã xác nhận đồng bộ — đang nén và đóng gói tin nhắn…".to_string();
+                                                crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
+                                                let _ = gui_tx_ctrl.send(GuiEvent::StatusUpdate(note));
+                                                ctx_ctrl.request_repaint();
+                                            }
+                                            crate::chat::MobileSyncControlEvent::UserRejected => {
+                                                let note = "⚠️ Bạn đã từ chối yêu cầu đồng bộ tin nhắn trên điện thoại".to_string();
+                                                crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
+                                                let _ = gui_tx_ctrl.send(GuiEvent::StatusUpdate(note));
+                                                ctx_ctrl.request_repaint();
+                                            }
+                                            crate::chat::MobileSyncControlEvent::BackupReady {
+                                                url,
+                                                file_name,
+                                                encrypted_key,
+                                                ..
+                                            } => {
+                                                let s_sync = s_snap.clone();
+                                                let gui_tx_sync = gui_tx_ctrl.clone();
+                                                let ctx_sync = ctx_ctrl.clone();
+                                                tokio::spawn(async move {
+                                                    let status_dl = format!("📥 Đang tải và giải mã gói đồng bộ tin nhắn ({file_name})…");
+                                                    crate::history_sync::set_last_mobile_sync_status(Some(status_dl.clone()));
+                                                    let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(status_dl));
+                                                    ctx_sync.request_repaint();
+
+                                                    match crate::history_sync::import_mobile_backup_container(&s_sync, &url, &encrypted_key).await {
+                                                        Ok(count) => {
+                                                             let note = format!("🎉 Đã giải mã & đồng bộ thành công {count} tin nhắn từ điện thoại vào ứng dụng!");
+                                                             crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
+                                                             let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(note));
+                                                             let updated = crate::chat::load_threads_cache();
+                                                             let _ = gui_tx_sync.send(GuiEvent::ThreadsUpdated(updated));
+                                                         }
+                                                         Err(e) => {
+                                                             let err_note = format!("⚠️ Không thể giải mã gói đồng bộ ({file_name}): {e}");
+                                                             crate::history_sync::set_last_mobile_sync_status(Some(err_note.clone()));
+                                                             let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(err_note));
+                                                         }
+                                                    }
+                                                    ctx_sync.request_repaint();
+                                                });
+                                            }
+                                            _ => {}
+                                        }
                                     }
                                 } else {
                                     tokio::time::sleep(Duration::from_secs(5)).await;

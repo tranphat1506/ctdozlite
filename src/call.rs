@@ -1030,6 +1030,7 @@ pub async fn poll_control_events(
     Vec<crate::chat::MuteControlEvent>,
     Vec<crate::chat::TypingEvent>,
     Vec<crate::chat::SeenEvent>,
+    Vec<crate::chat::MobileSyncControlEvent>,
 )> {
     if s.login.is_none() {
         bail!("chưa đăng nhập");
@@ -1057,6 +1058,7 @@ pub async fn poll_control_events(
     crate::chat::dispatch_file_done_controls(data_node);
     let mute_events = crate::chat::extract_mute_controls(data_node, ts);
     let (typing_events, seen_events) = crate::chat::extract_typing_and_seen_controls(data_node);
+    let sync_events = crate::chat::extract_mobile_sync_controls(data_node);
     if is_initial_cursor {
         // First poll with cursor "1" syncs `lastActionId`, but preserve any fresh (< 45s) incoming
         // `request` / `group_request` invite so a call ringing right as the app opens is not dropped.
@@ -1084,7 +1086,7 @@ pub async fn poll_control_events(
                 ev_ms > 0 && now_ms.saturating_sub(ev_ms) <= 45_000
             })
             .collect();
-        return Ok((fresh_invites, mute_events, typing_events, seen_events));
+        return Ok((fresh_invites, mute_events, typing_events, seen_events, sync_events));
     }
     let events = extract_voip_controls(data_node);
     if !events.is_empty() {
@@ -1098,12 +1100,12 @@ pub async fn poll_control_events(
             ),
         );
     }
-    Ok((events, mute_events, typing_events, seen_events))
+    Ok((events, mute_events, typing_events, seen_events, sync_events))
 }
 
 /// Poll `lp_control` (`getControllFromPolling`, cmd `99101`) once and return any incoming VoIP control events.
 pub async fn poll_voip_controls(s: &Session, state: &mut CtrlPollState) -> Result<Vec<Value>> {
-    let (voip, _, _, _) = poll_control_events(s, state).await?;
+    let (voip, _, _, _, _) = poll_control_events(s, state).await?;
     Ok(voip)
 }
 
