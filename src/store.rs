@@ -123,6 +123,36 @@ impl MessageStore {
             )?;
         }
 
+        // Migration 2: FTS5 full-text search table with automated synchronization triggers.
+        // Provides fast, diacritic-insensitive search for Vietnamese messages.
+        if conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? < 2 {
+            let fts_setup = "BEGIN;
+                 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+                     msg_id UNINDEXED,
+                     thread_id UNINDEXED,
+                     sender_name,
+                     text,
+                     tokenize = 'unicode61 remove_diacritics 2'
+                 );
+                 INSERT OR IGNORE INTO messages_fts(msg_id, thread_id, sender_name, text)
+                     SELECT msg_id, thread_id, sender_name, text FROM messages;
+                 CREATE TRIGGER IF NOT EXISTS trg_messages_ai AFTER INSERT ON messages BEGIN
+                     INSERT INTO messages_fts(msg_id, thread_id, sender_name, text)
+                     VALUES (new.msg_id, new.thread_id, new.sender_name, new.text);
+                 END;
+                 CREATE TRIGGER IF NOT EXISTS trg_messages_ad AFTER DELETE ON messages BEGIN
+                     DELETE FROM messages_fts WHERE msg_id = old.msg_id;
+                 END;
+                 CREATE TRIGGER IF NOT EXISTS trg_messages_au AFTER UPDATE ON messages BEGIN
+                     DELETE FROM messages_fts WHERE msg_id = old.msg_id;
+                     INSERT INTO messages_fts(msg_id, thread_id, sender_name, text)
+                     VALUES (new.msg_id, new.thread_id, new.sender_name, new.text);
+                 END;
+                 PRAGMA user_version = 2;
+                 COMMIT;";
+            let _ = conn.execute_batch(fts_setup);
+        }
+
         Ok(Self { conn })
     }
 
@@ -184,12 +214,50 @@ impl MessageStore {
         Ok(())
     }
 
-    /// Search messages across all threads by keyword (case-insensitive substring match) (#35).
+    /// Search messages across all threads by keyword using FTS5 (falling back to LIKE).
     pub fn search_messages(&self, query: &str, limit: usize) -> Result<Vec<StoredMessage>> {
         let q = query.trim();
         if q.is_empty() {
             return Ok(Vec::new());
         }
+
+        // Try FTS5 search first for indexed, diacritic-insensitive speed
+        let fts_query = format!("\"{}\"", q.replace('"', "\"\""));
+        let fts_stmt = self.conn.prepare(
+            "SELECT m.msg_id, m.thread_id, m.sender_id, m.sender_name, m.text, m.msg_type, m.ts, m.is_outgoing, m.raw_json
+             FROM messages_fts f
+             JOIN messages m ON f.msg_id = m.msg_id
+             WHERE messages_fts MATCH ?1
+             ORDER BY m.ts DESC
+             LIMIT ?2",
+        );
+
+        if let Ok(mut stmt) = fts_stmt {
+            if let Ok(rows) = stmt.query_map(params![fts_query, limit as i64], |row| {
+                let is_outgoing_num: i64 = row.get(7)?;
+                Ok(StoredMessage {
+                    msg_id: row.get(0)?,
+                    thread_id: row.get(1)?,
+                    sender_id: row.get(2).unwrap_or_default(),
+                    sender_name: row.get(3).unwrap_or_default(),
+                    text: row.get(4).unwrap_or_default(),
+                    msg_type: row.get(5).unwrap_or_default(),
+                    ts: row.get(6)?,
+                    is_outgoing: is_outgoing_num != 0,
+                    raw_json: row.get(8).unwrap_or_default(),
+                })
+            }) {
+                let mut out = Vec::new();
+                for r in rows.flatten() {
+                    out.push(r);
+                }
+                if !out.is_empty() {
+                    return Ok(out);
+                }
+            }
+        }
+
+        // Fallback to substring LIKE match if FTS5 is not available or query was formatted oddly
         let pattern = format!("%{}%", q.replace('%', "\\%").replace('_', "\\_"));
         let mut stmt = self.conn.prepare(
             "SELECT msg_id, thread_id, sender_id, sender_name, text, msg_type, ts, is_outgoing, raw_json
@@ -1997,6 +2065,29 @@ mod tests {
         let hits = store.search_messages("ctdozlite", 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].msg_id, "m_search_1");
+
+        // FTS diacritic-insensitive search for Vietnamese content
+        store
+            .upsert_message(&StoredMessage {
+                msg_id: "m_vn_1".into(),
+                thread_id: "t1".into(),
+                sender_id: "u1".into(),
+                sender_name: "Nguyễn Văn An".into(),
+                text: "Chào buổi sáng mọi người".into(),
+                msg_type: "chat.text".into(),
+                ts: 200,
+                is_outgoing: false,
+                raw_json: "".into(),
+            })
+            .unwrap();
+
+        let vn_hits = store.search_messages("nguyen", 10).unwrap();
+        assert_eq!(vn_hits.len(), 1);
+        assert_eq!(vn_hits[0].msg_id, "m_vn_1");
+
+        let vn_hits_accent = store.search_messages("Nguyễn", 10).unwrap();
+        assert_eq!(vn_hits_accent.len(), 1);
+        assert_eq!(vn_hits_accent[0].msg_id, "m_vn_1");
 
         store.delete_thread("t1").unwrap();
         assert!(store.messages_for("t1", 10).unwrap().is_empty());
