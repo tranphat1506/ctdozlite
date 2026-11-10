@@ -908,7 +908,10 @@ impl ZaloGuiApp {
                             // Like official Zalo: hide contacts that have never had any messages unless
                             // actively searching, explicitly enabled in settings, or currently selected.
                             let has_messages = !t.messages.is_empty()
-                                || !t.preview.trim().is_empty()
+                                || (!t.preview.trim().is_empty()
+                                    && !t.preview.starts_with("Nhóm · ")
+                                    && t.preview != "Nhóm trò chuyện"
+                                    && t.preview != "Chưa có tin nhắn")
                                 || t.name.contains("Cloud của tôi")
                                 || !query.is_empty();
 
