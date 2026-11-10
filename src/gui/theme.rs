@@ -277,11 +277,22 @@ pub(super) fn avatar_color_for(name: &str, is_group: bool) -> Color32 {
     PALETTE[hash % PALETTE.len()]
 }
 
-pub(super) fn truncate_chars<'a>(s: &'a str, max_chars: usize) -> std::borrow::Cow<'a, str> {
-    if let Some((byte_idx, _)) = s.char_indices().nth(max_chars) {
-        std::borrow::Cow::Owned(format!("{}…", &s[..byte_idx]))
+/// Strip invisible Unicode Variation Selectors (`U+FE0F` / `U+FE0E`) that cause broken square
+/// missing-glyph boxes on Linux desktop font engines when rendering iPhone emojis.
+pub fn clean_emoji_presentation(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.contains('\u{FE0F}') || s.contains('\u{FE0E}') {
+        std::borrow::Cow::Owned(s.replace(['\u{FE0F}', '\u{FE0E}'], ""))
     } else {
         std::borrow::Cow::Borrowed(s)
+    }
+}
+
+pub(super) fn truncate_chars<'a>(s: &'a str, max_chars: usize) -> std::borrow::Cow<'a, str> {
+    let clean = clean_emoji_presentation(s);
+    if let Some((byte_idx, _)) = clean.char_indices().nth(max_chars) {
+        std::borrow::Cow::Owned(format!("{}…", &clean[..byte_idx]))
+    } else {
+        clean
     }
 }
 
@@ -1145,7 +1156,32 @@ fn build_fonts(ctx: &egui::Context, with_cjk: bool) {
         }
     }
 
-    // Fallback order: bundled sans guarantees Vietnamese coverage, CJK supplies Han/Kana/Hangul, Lucide supplies icon glyphs
+    // 4. Color & Vector Emoji system fonts (renders modern iPhone Unicode 14/15/16 emojis)
+    let emoji_candidates = [
+        "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+        "/usr/share/fonts/google-noto-color-emoji/NotoColorEmoji.ttf",
+        "/usr/share/fonts/noto-color-emoji/NotoColorEmoji.ttf",
+        "/usr/share/fonts/noto/NotoColorEmoji.ttf",
+        "/usr/share/fonts/TTF/NotoColorEmoji.ttf",
+        "/usr/share/fonts/truetype/ancient-scripts/Symbola_hint.ttf",
+        "/usr/share/fonts/truetype/ancient-scripts/Symbola.ttf",
+        "/usr/share/fonts/truetype/twitter-color-emoji/TwitterColorEmoji.ttf",
+        "/usr/share/fonts/truetype/joypixels/JoyPixels.ttf",
+        "C:\\Windows\\Fonts\\seguiemj.ttf",
+        "/System/Library/Fonts/Apple Color Emoji.ttc",
+    ];
+    for path in emoji_candidates {
+        if let Ok(font_data) = std::fs::read(path) {
+            fonts.font_data.insert(
+                "emoji_font".to_owned(),
+                egui::FontData::from_owned(font_data),
+            );
+            break;
+        }
+    }
+
+    // Fallback order: bundled sans guarantees Vietnamese coverage, CJK supplies Han/Kana/Hangul,
+    // emoji_font supplies modern color glyphs, and Lucide supplies vector UI icons.
     let prop = fonts
         .families
         .entry(egui::FontFamily::Proportional)
@@ -1156,6 +1192,9 @@ fn build_fonts(ctx: &egui::Context, with_cjk: bool) {
     }
     if fonts.font_data.contains_key("cjk_font") {
         prop.push("cjk_font".to_owned());
+    }
+    if fonts.font_data.contains_key("emoji_font") {
+        prop.push("emoji_font".to_owned());
     }
     prop.push("lucide_font".to_owned());
 
@@ -1169,6 +1208,9 @@ fn build_fonts(ctx: &egui::Context, with_cjk: bool) {
     }
     if fonts.font_data.contains_key("cjk_font") {
         mono.push("cjk_font".to_owned());
+    }
+    if fonts.font_data.contains_key("emoji_font") {
+        mono.push("emoji_font".to_owned());
     }
     mono.push("lucide_font".to_owned());
 
@@ -1202,5 +1244,12 @@ mod search_match_tests {
     #[test]
     fn empty_query_matches_everything() {
         assert!(matches("anything", ""));
+    }
+
+    #[test]
+    fn test_clean_emoji_presentation_strips_variation_selectors() {
+        assert_eq!(clean_emoji_presentation("Lemmm 💗💗🫶🫶"), "Lemmm 💗💗🫶🫶");
+        assert_eq!(clean_emoji_presentation("❤️"), "❤");
+        assert_eq!(clean_emoji_presentation("Text\u{FE0F}\u{FE0E}"), "Text");
     }
 }

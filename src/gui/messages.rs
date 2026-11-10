@@ -1782,7 +1782,8 @@ pub(super) fn render_message_body(
         } else {
             &msg.text
         };
-        render_chat_markdown_block(ui, display_text, text_col, pal);
+        let clean_text = crate::gui::theme::clean_emoji_presentation(display_text);
+        render_chat_markdown_block(ui, &clean_text, text_col, pal);
         return None;
     };
 
