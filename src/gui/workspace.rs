@@ -1133,11 +1133,11 @@ impl ZaloGuiApp {
                                     text_left
                                 };
                                 let display_name = truncate_chars(&t.name, max_name_chars);
-                                ui.painter().text(
+                                super::emoji::paint_inline_emoji_text(
+                                    ui,
                                     Pos2::new(name_x, row_rect.top() + 12.0),
-                                    egui::Align2::LEFT_TOP,
-                                    display_name,
-                                    FontId::proportional(13.6),
+                                    &display_name,
+                                    13.6,
                                     name_color,
                                 );
 
@@ -1246,19 +1246,22 @@ impl ZaloGuiApp {
                                     28
                                 };
                                 let snippet = truncate_chars(&raw_preview, max_snip_chars);
-                                ui.painter().text(
+                                let snippet_col = if is_typing_in_t {
+                                    pal.primary
+                                } else if unread_n > 0 {
+                                    pal.text_primary
+                                } else {
+                                    pal.text_secondary
+                                };
+                                super::emoji::paint_inline_emoji_text(
+                                    ui,
                                     Pos2::new(text_left, row_rect.top() + 33.5),
-                                    egui::Align2::LEFT_TOP,
-                                    snippet,
-                                    FontId::proportional(12.0),
-                                    if is_typing_in_t {
-                                        pal.primary
-                                    } else if unread_n > 0 {
-                                        pal.text_primary
-                                    } else {
-                                        pal.text_secondary
-                                    },
+                                    &snippet,
+                                    12.0,
+                                    snippet_col,
                                 );
+                                // Keep unread badge code untouched below
+                                let _ = snippet_col;
                                 if unread_n > 0 {
                                     let badge_txt = if unread_n > 99 {
                                         "99+".to_string()
@@ -1989,11 +1992,12 @@ impl ZaloGuiApp {
                                         &mut self.loading_stickers,
                                     );
                                     ui.add_space(10.0);
-                                    ui.label(
-                                        RichText::new(d_name)
-                                            .size(14.5)
-                                            .color(pal.text_primary)
-                                            .strong(),
+                                    super::emoji::render_inline_emoji_line(
+                                        ui,
+                                        d_name,
+                                        14.5,
+                                        pal.text_primary,
+                                        true,
                                     );
                                     ui.add_space(2.0);
                                     let d_is_cloud = d_name.contains("Cloud của tôi");
@@ -2972,17 +2976,13 @@ impl ZaloGuiApp {
                                         ui.spacing_mut().item_spacing.y = 2.0;
                                         ui.horizontal(|ui| {
                                             let name_max = if is_compact_w { 12 } else { 22 };
-                                            ui.add(
-                                                egui::Label::new(
-                                                    RichText::new(truncate_chars(
-                                                        &thread_name,
-                                                        name_max,
-                                                    ))
-                                                    .size(15.0)
-                                                    .color(pal.text_primary)
-                                                    .strong(),
-                                                )
-                                                .truncate(),
+                                            let name_disp = truncate_chars(&thread_name, name_max);
+                                            super::emoji::render_inline_emoji_line(
+                                                ui,
+                                                &name_disp,
+                                                15.0,
+                                                pal.text_primary,
+                                                true,
                                             );
                                             if !is_compact_w && left_info_w > 170.0 {
                                                 let (tag_lbl, tag_fg, tag_bg) =

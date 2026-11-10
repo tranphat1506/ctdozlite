@@ -1025,6 +1025,17 @@ fn render_markdown_inline_rich(
     base_color: Color32,
     pal: &ThemePalette,
 ) {
+    if super::emoji::contains_color_emoji(text)
+        && !text.contains("**")
+        && !text.contains("__")
+        && !text.contains("~~")
+        && !text.contains("](")
+        && !text.contains('`')
+        && !text.contains('@')
+    {
+        super::emoji::render_wrapped_emoji_text(ui, text, base_size, base_color);
+        return;
+    }
     let mut job = egui::text::LayoutJob::default();
     let mut first_link: Option<String> = None;
     let mut rest = text;

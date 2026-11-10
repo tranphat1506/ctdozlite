@@ -1156,17 +1156,11 @@ fn build_fonts(ctx: &egui::Context, with_cjk: bool) {
         }
     }
 
-    // 4. Color & Vector Emoji system fonts (renders modern iPhone Unicode 14/15/16 emojis)
+    // 4. Optional vector/native emoji fonts (CBDT bitmap fonts like NotoColorEmoji.ttf are handled
+    // natively in full color by `crate::gui::emoji` because `ab_glyph` cannot rasterize CBDT).
     let emoji_candidates = [
-        "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
-        "/usr/share/fonts/google-noto-color-emoji/NotoColorEmoji.ttf",
-        "/usr/share/fonts/noto-color-emoji/NotoColorEmoji.ttf",
-        "/usr/share/fonts/noto/NotoColorEmoji.ttf",
-        "/usr/share/fonts/TTF/NotoColorEmoji.ttf",
         "/usr/share/fonts/truetype/ancient-scripts/Symbola_hint.ttf",
         "/usr/share/fonts/truetype/ancient-scripts/Symbola.ttf",
-        "/usr/share/fonts/truetype/twitter-color-emoji/TwitterColorEmoji.ttf",
-        "/usr/share/fonts/truetype/joypixels/JoyPixels.ttf",
         "C:\\Windows\\Fonts\\seguiemj.ttf",
         "/System/Library/Fonts/Apple Color Emoji.ttc",
     ];
