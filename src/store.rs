@@ -418,6 +418,92 @@ impl MessageStore {
         Ok(list)
     }
 
+    /// Retrieve media items (photos, files, links) directly from SQLite for a thread.
+    pub fn conversation_media_items(
+        &self,
+        thread_id: &str,
+    ) -> Result<(
+        Vec<(String, String, String, String)>, // (thumb_key, thumb_url, full_url, title)
+        Vec<(String, String, String)>,         // (file_name, time, file_url)
+        Vec<(String, String)>,                 // (title, url)
+    )> {
+        let mut stmt = self.conn.prepare(
+            "SELECT msg_id, text, msg_type, ts, raw_json
+             FROM messages
+             WHERE thread_id = ?1 AND (
+                 msg_type IN ('chat.photo', 'chat.video', 'chat.file', 'chat.link')
+                 OR text LIKE '[Hình ảnh]%'
+                 OR text LIKE '[Tập tin]%'
+                 OR raw_json LIKE '%link_url%'
+             )
+             ORDER BY ts DESC
+             LIMIT 150",
+        )?;
+
+        let mut photos = Vec::new();
+        let mut files = Vec::new();
+        let mut links = Vec::new();
+
+        let rows = stmt.query_map(params![thread_id], |row| {
+            let msg_id: String = row.get(0)?;
+            let text: String = row.get(1).unwrap_or_default();
+            let msg_type: String = row.get(2).unwrap_or_default();
+            let ts: i64 = row.get(3).unwrap_or(0);
+            let raw_json: String = row.get(4).unwrap_or_default();
+            Ok((msg_id, text, msg_type, ts, raw_json))
+        })?;
+
+        for r in rows.flatten() {
+            let (_msg_id, text, msg_type, ts, raw_json) = r;
+            let time_str = if ts > 0 { crate::clock::message_time(ts) } else { String::new() };
+
+            let mut link_url = None;
+            let mut link_thumb = None;
+            let mut link_title = None;
+            let mut link_src = None;
+
+            if !raw_json.is_empty() {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw_json) {
+                    link_url = v.get("link_url").and_then(|x| x.as_str()).map(str::to_string);
+                    link_thumb = v.get("link_thumb").and_then(|x| x.as_str()).map(str::to_string);
+                    link_title = v.get("link_title").and_then(|x| x.as_str()).map(str::to_string);
+                    link_src = v.get("link_src").and_then(|x| x.as_str()).map(str::to_string);
+                }
+            }
+
+            let is_photo = msg_type == "chat.photo"
+                || link_src.as_deref() == Some("Hình ảnh Zalo")
+                || text.trim() == "[Hình ảnh]"
+                || text.trim().starts_with("[Hình ảnh] ");
+
+            let is_file = msg_type == "chat.file"
+                || link_src.as_deref() == Some("Tập tin Zalo")
+                || text.trim().starts_with("[Tập tin] ");
+
+            if is_photo && photos.len() < 36 {
+                let thumb = link_thumb.or_else(|| link_url.clone());
+                if let Some(t_url) = thumb.filter(|u| !u.is_empty()) {
+                    let full = link_url.unwrap_or_else(|| t_url.clone());
+                    let title = link_title.unwrap_or_else(|| "Hình ảnh".into());
+                    let key = format!("thumb_{}", crate::crypto::md5_hex(&t_url));
+                    photos.push((key, t_url, full, title));
+                }
+            } else if is_file && files.len() < 30 {
+                let fname = link_title.unwrap_or_else(|| {
+                    text.strip_prefix("[Tập tin] ").unwrap_or(&text).trim().to_string()
+                });
+                files.push((fname, time_str, link_url.unwrap_or_default()));
+            } else if let Some(url) = link_url {
+                if !url.is_empty() && !is_photo && !is_file && links.len() < 30 {
+                    let ltitle = link_title.unwrap_or_else(|| url.clone());
+                    links.push((ltitle, url));
+                }
+            }
+        }
+
+        Ok((photos, files, links))
+    }
+
     /// Retrieve all persisted thread metadata ordered by `last_ts` descending.
     pub fn all_threads(&self) -> Result<Vec<StoredThread>> {
         let has_read_col = self

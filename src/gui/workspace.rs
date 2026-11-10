@@ -1938,43 +1938,15 @@ impl ZaloGuiApp {
 
         if show_info_drawer {
             if let Some((ref d_id, ref d_name, ref d_ava, d_is_group, d_msg_count)) = thread_meta {
-                let (shared_photos, shared_files, shared_links) = self
-                    .threads
-                    .get(self.selected_thread_index)
-                    .map(|t| {
-                        let mut photos = Vec::new();
-                        let mut files = Vec::new();
-                        let mut links = Vec::new();
-                        for m in t.messages.iter().rev() {
-                            let is_sticker = is_sticker_message(m).is_some();
-                            if is_sticker {
-                                continue;
-                            }
-                            let is_photo = m.link_src.as_deref() == Some("Hình ảnh Zalo")
-                                || m.text.trim() == "[Hình ảnh]"
-                                || m.text.trim().starts_with("[Hình ảnh] ");
-                            let is_file = m.text.trim().starts_with("[Tập tin] ")
-                                || m.link_src.as_deref() == Some("Tập tin Zalo")
-                                || is_zalo_file_or_video_message(m);
-                            if is_photo && photos.len() < 24 {
-                                if let Some(thumb) = m.link_thumb.as_deref().or(m.link_url.as_deref()).filter(|u| !u.is_empty()) {
-                                    let full = m.link_url.as_deref().unwrap_or(thumb).to_string();
-                                    let title = m.link_title.clone().unwrap_or_else(|| "Hình ảnh".into());
-                                    photos.push((format!("thumb_{}", crate::crypto::md5_hex(thumb)), thumb.to_string(), full, title));
-                                }
-                            } else if is_file && files.len() < 20 {
-                                let fname = m.text.strip_prefix("[Tập tin] ").unwrap_or(&m.text).trim().to_string();
-                                files.push((fname, m.time.clone(), m.link_url.clone().unwrap_or_default()));
-                            } else if let Some(ref url) = m.link_url {
-                                if !url.is_empty() && !is_photo && !is_file && links.len() < 20 {
-                                    let ltitle = m.link_title.clone().unwrap_or_else(|| url.clone());
-                                    links.push((ltitle, url.clone()));
-                                }
-                            }
-                        }
-                        (photos, files, links)
-                    })
-                    .unwrap_or_default();
+                let uin_str = self.user_uin.clone();
+                let (shared_photos, shared_files, shared_links) = {
+                    let db_path = crate::store::db_path_for_account(&uin_str);
+                    if let Ok(store) = crate::store::MessageStore::open(&db_path) {
+                        store.conversation_media_items(d_id).unwrap_or_default()
+                    } else {
+                        (Vec::new(), Vec::new(), Vec::new())
+                    }
+                };
 
                 egui::SidePanel::right("conversation_info_drawer")
                     .resizable(false)
