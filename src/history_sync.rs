@@ -1335,7 +1335,7 @@ pub async fn import_sync_v2_messages(s: &Session, url: &str) -> Result<usize> {
     for part in partitions {
         let thread_id = part.id.clone();
         for m in part.messages {
-            let is_outgoing = m.sender_id == uin;
+            let is_outgoing = m.sender_id == uin || m.sender_id == "0" || m.sender_id.is_empty();
             let sender_name = if is_outgoing {
                 my_name.clone()
             } else {
@@ -1347,9 +1347,31 @@ pub async fn import_sync_v2_messages(s: &Session, url: &str) -> Result<usize> {
                 m.client_id.to_string()
             };
 
-            let (msg_type, raw_json) =
-                crate::store::build_media_meta_from_text(&m.content, "webchat")
-                    .unwrap_or_else(|| ("webchat".to_string(), String::new()));
+            let mut text = m.content.trim().to_string();
+            let mut msg_type = match m.msg_type {
+                3 => "chat.photo",
+                10 => "chat.sticker",
+                12 => "chat.link",
+                _ => "webchat",
+            }
+            .to_string();
+            let mut raw_json = String::new();
+
+            if let Some((cate_id, sticker_id)) = crate::store::parse_caret_sticker(&text) {
+                msg_type = "chat.sticker".to_string();
+                text = "[Nhãn dán]".to_string();
+                raw_json = serde_json::json!({
+                    "cateId": cate_id,
+                    "stickerId": sticker_id,
+                    "type": 7,
+                })
+                .to_string();
+            } else if let Some((mtype, rjson)) =
+                crate::store::build_media_meta_from_text(&text, &msg_type)
+            {
+                msg_type = mtype;
+                raw_json = rjson;
+            }
 
             let sm = crate::store::StoredMessage {
                 msg_id,
@@ -1360,7 +1382,7 @@ pub async fn import_sync_v2_messages(s: &Session, url: &str) -> Result<usize> {
                     thread_id.clone()
                 },
                 sender_name,
-                text: m.content,
+                text,
                 msg_type,
                 ts: m.timestamp as i64,
                 is_outgoing,

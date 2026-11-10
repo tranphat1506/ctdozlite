@@ -99,6 +99,19 @@ pub fn send_sync_message_ws_request(payload: &Value) -> bool {
     });
     send_ws_frame(CMD_SYNC_REQUEST, 0, 1, Some(&body))
 }
+
+/// Emit `SYNC_MESSAGE.ACK_DELETE_SYNC_SESSION` (`cmd 591`, `subCmd 0`) over WebSocket
+/// to notify mobile device that Sync V2 session is completed, dismissing the mobile sync spinner.
+pub fn send_sync_ack_delete(sync_id: &str) -> bool {
+    let req_id = format!("req_591_{}", now_ms());
+    let body = json!({
+        "reqId": req_id,
+        "data": {
+            "syncId": sync_id
+        }
+    });
+    send_ws_frame(CMD_SYNC_ACK_DELETE, 0, 1, Some(&body))
+}
 const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
                   (KHTML, like Gecko) ZaloPC/26.10.11 Chrome/122.0.0.0 Electron/29.0.0 Safari/537.36";
 

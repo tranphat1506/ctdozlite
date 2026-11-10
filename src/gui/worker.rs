@@ -729,6 +729,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
 
                                                                 match crate::history_sync::import_sync_v2_messages(&s_sync, &url).await {
                                                                     Ok(count) => {
+                                                                        let _ = crate::socket::send_sync_ack_delete(&sync_id);
                                                                         let fin = format!("🎉 Đã giải mã & đồng bộ thành công {count} tin nhắn từ điện thoại vào ứng dụng!");
                                                                         crate::history_sync::set_last_mobile_sync_status(Some(fin.clone()));
                                                                         let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(fin));
@@ -985,6 +986,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
 
                                                         match crate::history_sync::import_sync_v2_messages(&s_sync, &url).await {
                                                             Ok(count) => {
+                                                                let _ = crate::socket::send_sync_ack_delete(&sync_id);
                                                                 let fin = format!("🎉 Đã giải mã & đồng bộ thành công {count} tin nhắn từ điện thoại vào ứng dụng!");
                                                                 crate::history_sync::set_last_mobile_sync_status(Some(fin.clone()));
                                                                 let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(fin));
@@ -1894,6 +1896,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
 
                                                                     match crate::history_sync::import_sync_v2_messages(&s_sync, &url).await {
                                                                         Ok(count) => {
+                                                                            let _ = crate::socket::send_sync_ack_delete(&sync_id);
                                                                             let fin = format!("🎉 Đã giải mã & đồng bộ thành công {count} tin nhắn từ điện thoại vào ứng dụng!");
                                                                             crate::history_sync::set_last_mobile_sync_status(Some(fin.clone()));
                                                                             let _ = gui_tx_sync.send(GuiEvent::StatusUpdate(fin));
