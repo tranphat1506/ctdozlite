@@ -846,7 +846,16 @@ pub async fn import_mobile_backup_container(
                 } else if msg_type_num == 3 {
                     text = "[Hình ảnh]".to_string();
                 } else if msg_type_num == 12 {
-                    text = "[Liên kết]".to_string();
+                    if peer_internal_fid.is_some() {
+                        msg_type = "chat.call".to_string();
+                        text = if is_outgoing {
+                            "Cuộc gọi thoại đi - Người nhận không nghe máy".to_string()
+                        } else {
+                            "Cuộc gọi thoại nhỡ".to_string()
+                        };
+                    } else {
+                        text = "[Thông báo]".to_string();
+                    }
                 }
             }
 

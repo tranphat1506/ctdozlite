@@ -587,6 +587,37 @@ impl MessageStore {
             }
         }
 
+        // Migration 6: repair call duration messages (e.g. "0:31", "10:18") and missed call placeholders
+        // previously misclassified as `[Liên kết]` by the mobile backup importer.
+        if conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? < 6 {
+            if let Ok(tx) = conn.transaction() {
+                let _ = tx.execute("DROP TRIGGER IF EXISTS trg_messages_au", []);
+                let _ = tx.execute(
+                    "UPDATE messages
+                     SET msg_type = 'chat.call'
+                     WHERE text GLOB '[0-9]*:[0-9][0-9]' OR text GLOB '[0-9]*:[0-9][0-9]:[0-9][0-9]'",
+                    [],
+                );
+                let _ = tx.execute(
+                    "UPDATE messages
+                     SET msg_type = 'chat.call',
+                         text = CASE WHEN is_outgoing = 1 THEN 'Cuộc gọi thoại đi - Người nhận không nghe máy' ELSE 'Cuộc gọi thoại nhỡ' END
+                     WHERE text = '[Liên kết]' AND (raw_json = '' OR raw_json IS NULL)",
+                    [],
+                );
+                let _ = tx.execute(
+                    "CREATE TRIGGER IF NOT EXISTS trg_messages_au AFTER UPDATE ON messages BEGIN
+                         DELETE FROM messages_fts WHERE msg_id = old.msg_id;
+                         INSERT INTO messages_fts(msg_id, thread_id, sender_name, text)
+                         VALUES (new.msg_id, new.thread_id, new.sender_name, new.text);
+                     END;",
+                    [],
+                );
+                let _ = tx.execute("PRAGMA user_version = 6", []);
+                let _ = tx.commit();
+            }
+        }
+
         Ok(Self { conn })
     }
 
@@ -1407,6 +1438,9 @@ impl MessageStore {
                         if existing.text.starts_with("[^") {
                             existing.text = "[Nhãn dán]".to_string();
                         }
+                    }
+                    if cm.text.starts_with("Cuộc gọi") && existing.text == "[Liên kết]" {
+                        existing.text = cm.text.clone();
                     }
                     if existing.reply_to_text.is_none() && cm.reply_to_text.is_some() {
                         existing.reply_to_id = cm.reply_to_id;

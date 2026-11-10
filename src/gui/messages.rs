@@ -77,13 +77,40 @@ pub(super) struct CallCardView {
     pub(super) is_missed_or_failed: bool,
 }
 
+fn parse_mmss_duration(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() || !s.chars().all(|c| c.is_ascii_digit() || c == ':') {
+        return None;
+    }
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() == 2 {
+        let m = parts[0].parse::<u64>().ok()?;
+        let s = parts[1].parse::<u64>().ok()?;
+        if s < 60 {
+            return Some(m * 60 + s);
+        }
+    } else if parts.len() == 3 {
+        let h = parts[0].parse::<u64>().ok()?;
+        let m = parts[1].parse::<u64>().ok()?;
+        let s = parts[2].parse::<u64>().ok()?;
+        if m < 60 && s < 60 {
+            return Some(h * 3600 + m * 60 + s);
+        }
+    }
+    None
+}
+
 /// Detect whether `msg` is a voice/video call log entry and parse its structured metadata.
 pub(super) fn extract_call_card_view(msg: &ChatMessage) -> Option<CallCardView> {
     let raw = msg.text.trim();
     let is_call_id = msg.id.starts_with("call_");
-    let is_call_text = raw == "Cuộc gọi"
+    let dur_opt = parse_mmss_duration(raw);
+    let is_call_text = dur_opt.is_some()
+        || raw == "Cuộc gọi"
         || raw == "Cuộc gọi thoại"
         || raw == "Cuộc gọi video"
+        || raw == "Cuộc gọi thoại nhỡ"
+        || raw.starts_with("Cuộc gọi nhỡ")
         || raw.starts_with("📞")
         || raw.starts_with("📹")
         || raw.starts_with("Cuộc gọi đi")
@@ -95,13 +122,17 @@ pub(super) fn extract_call_card_view(msg: &ChatMessage) -> Option<CallCardView> 
 
     let lower = raw.to_lowercase();
     let is_video = lower.contains("video") || raw.starts_with("📹");
-    let is_incoming = lower.contains("gọi đến") || (!lower.contains("gọi đi") && !msg.is_outgoing);
+    let is_incoming = lower.contains("gọi đến")
+        || lower.contains("nhỡ")
+        || (!lower.contains("gọi đi") && !msg.is_outgoing);
 
-    // Parse optional duration `(Ns)`
-    let secs_opt: Option<u64> = raw.find('(').and_then(|open| {
-        let rest = &raw[open + 1..];
-        let close = rest.find("s)")?;
-        rest[..close].trim().parse::<u64>().ok()
+    // Parse optional duration `(Ns)` or `mm:ss`
+    let secs_opt: Option<u64> = dur_opt.or_else(|| {
+        raw.find('(').and_then(|open| {
+            let rest = &raw[open + 1..];
+            let close = rest.find("s)")?;
+            rest[..close].trim().parse::<u64>().ok()
+        })
     });
 
     // Parse optional failure/rejection reason after `—` or `-`
@@ -114,7 +145,9 @@ pub(super) fn extract_call_card_view(msg: &ChatMessage) -> Option<CallCardView> 
     let is_missed_or_failed = match secs_opt {
         Some(0) => true,
         Some(_) => raw_reason.is_some(),
-        None => raw_reason.is_some() || (!msg.is_outgoing && raw == "Cuộc gọi"),
+        None => {
+            raw_reason.is_some() || lower.contains("nhỡ") || (!msg.is_outgoing && raw == "Cuộc gọi")
+        }
     };
 
     let title = if is_video {
@@ -3446,5 +3479,28 @@ mod quote_navigation_tests {
             extract_photo_user_caption(&real_caption_msg),
             Some("Xem ảnh này nè")
         );
+    }
+
+    #[test]
+    fn call_card_parses_mmss_duration_and_missed_call() {
+        let dur_msg = ChatMessage {
+            text: "0:31".into(),
+            is_outgoing: false,
+            ..Default::default()
+        };
+        let card = extract_call_card_view(&dur_msg).expect("0:31 must render as CallCardView");
+        assert_eq!(card.title, "Cuộc gọi thoại đến");
+        assert!(!card.is_missed_or_failed);
+        assert!(card.status_badge.contains("31 giây"));
+
+        let missed_msg = ChatMessage {
+            text: "Cuộc gọi thoại nhỡ".into(),
+            is_outgoing: false,
+            ..Default::default()
+        };
+        let missed =
+            extract_call_card_view(&missed_msg).expect("Missed call must render as CallCardView");
+        assert_eq!(missed.title, "Cuộc gọi thoại nhỡ");
+        assert!(missed.is_missed_or_failed);
     }
 }
