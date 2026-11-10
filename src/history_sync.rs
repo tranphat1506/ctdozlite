@@ -699,6 +699,7 @@ pub async fn import_mobile_backup_container(
 
     let mut curr_offset = 0;
     let mut total_imported = 0;
+    let mut extracted_dbs: Vec<(String, String, std::path::PathBuf)> = Vec::new();
 
     for (name, size) in toc {
         if curr_offset + size > payload.len() {
@@ -715,6 +716,20 @@ pub async fn import_mobile_backup_container(
         if std::fs::write(&temp_db_path, db_bytes).is_err() {
             continue;
         }
+        extracted_dbs.push((name, thread_id.clone(), temp_db_path));
+    }
+
+    // Process 1-1 `{fid}.db` files before `group_{gid}.db` so we discover `my_internal_uin`
+    // (because mobile SQLite `SenderId` uses the short internal UIN, not the 19-digit znoise UID).
+    extracted_dbs.sort_by_key(|(name, _, _)| name.starts_with("group_"));
+    let mut my_internal_uin: Option<i64> = None;
+
+    for (name, thread_id, temp_db_path) in extracted_dbs {
+        let peer_internal_fid = if !name.starts_with("group_") {
+            name.trim_end_matches(".db").parse::<i64>().ok()
+        } else {
+            None
+        };
 
         let Ok(conn) = Connection::open(&temp_db_path) else {
             continue;
@@ -753,7 +768,18 @@ pub async fn import_mobile_backup_container(
                 content_opt,
                 bin_net_opt,
             ) = r;
-            let is_outgoing = sender_id_num == my_uin;
+            if let Some(pfid) = peer_internal_fid {
+                if sender_id_num > 0 && sender_id_num != pfid && my_internal_uin.is_none() {
+                    my_internal_uin = Some(sender_id_num);
+                }
+            }
+            let is_cli_ts_self =
+                glb_msg_id <= 0 && (1_000_000_000_000..=2_500_000_000_000).contains(&cli_msg_id);
+            let is_outgoing = sender_id_num == 0
+                || sender_id_num == my_uin
+                || my_internal_uin == Some(sender_id_num)
+                || peer_internal_fid.is_some_and(|pfid| sender_id_num != pfid)
+                || is_cli_ts_self;
             let sender_id = if is_outgoing {
                 my_uid.clone()
             } else {
@@ -780,6 +806,17 @@ pub async fn import_mobile_backup_container(
             }
             .to_string();
             let mut raw_json = String::new();
+
+            if let Some((cate_id, sticker_id)) = crate::store::parse_caret_sticker(&text) {
+                msg_type = "chat.sticker".to_string();
+                text = "[Nhãn dán]".to_string();
+                raw_json = serde_json::json!({
+                    "cateId": cate_id,
+                    "stickerId": sticker_id,
+                    "type": 7,
+                })
+                .to_string();
+            }
 
             if text.is_empty() {
                 if let Some(bn) = &bin_net_opt {
@@ -813,57 +850,62 @@ pub async fn import_mobile_backup_container(
                 }
             }
 
-            if let Some((mtype, rjson)) = crate::store::build_media_meta_from_text(&text, &msg_type)
-            {
-                msg_type = mtype;
-                raw_json = rjson;
-            } else if let Some(bn) = &bin_net_opt {
-                let mut ascii = String::with_capacity(bn.len());
-                for &b in bn {
-                    ascii.push(if (0x20..=0x7E).contains(&b) {
-                        b as char
-                    } else {
-                        ' '
-                    });
-                }
-                let bin_urls = crate::store::extract_http_urls(&ascii);
-                if let Some(first_url) = bin_urls.into_iter().next() {
-                    let hint = if text.is_empty() {
-                        first_url.as_str()
-                    } else {
-                        text.as_str()
-                    };
-                    if let Some(kind) = crate::store::classify_url_kind(&first_url, hint, &msg_type)
-                    {
-                        match kind {
-                            crate::store::MediaKind::Photos => {
-                                let safe = crate::store::jxl_to_jpg_url(&first_url);
-                                msg_type = "chat.photo".to_string();
-                                raw_json = serde_json::json!({
-                                    "link_src": "Hình ảnh Zalo",
-                                    "link_url": safe,
-                                    "link_thumb": safe,
-                                })
-                                .to_string();
-                            }
-                            crate::store::MediaKind::Files => {
-                                let (fname, _) = crate::store::extract_filename_and_ext(&first_url);
-                                msg_type = "chat.file".to_string();
-                                raw_json = serde_json::json!({
-                                    "link_src": "Tập tin Zalo",
-                                    "link_title": fname,
-                                    "link_url": first_url,
-                                })
-                                .to_string();
-                            }
-                            crate::store::MediaKind::Links => {
-                                let dom = crate::store::extract_domain_from_url(&first_url);
-                                msg_type = "chat.link".to_string();
-                                raw_json = serde_json::json!({
-                                    "link_url": first_url,
-                                    "link_title": if dom.is_empty() { first_url.clone() } else { dom },
-                                })
-                                .to_string();
+            if raw_json.is_empty() {
+                if let Some((mtype, rjson)) =
+                    crate::store::build_media_meta_from_text(&text, &msg_type)
+                {
+                    msg_type = mtype;
+                    raw_json = rjson;
+                } else if let Some(bn) = &bin_net_opt {
+                    let mut ascii = String::with_capacity(bn.len());
+                    for &b in bn {
+                        ascii.push(if (0x20..=0x7E).contains(&b) {
+                            b as char
+                        } else {
+                            ' '
+                        });
+                    }
+                    let bin_urls = crate::store::extract_http_urls(&ascii);
+                    if let Some(first_url) = bin_urls.into_iter().next() {
+                        let hint = if text.is_empty() {
+                            first_url.as_str()
+                        } else {
+                            text.as_str()
+                        };
+                        if let Some(kind) =
+                            crate::store::classify_url_kind(&first_url, hint, &msg_type)
+                        {
+                            match kind {
+                                crate::store::MediaKind::Photos => {
+                                    let safe = crate::store::jxl_to_jpg_url(&first_url);
+                                    msg_type = "chat.photo".to_string();
+                                    raw_json = serde_json::json!({
+                                        "link_src": "Hình ảnh Zalo",
+                                        "link_url": safe,
+                                        "link_thumb": safe,
+                                    })
+                                    .to_string();
+                                }
+                                crate::store::MediaKind::Files => {
+                                    let (fname, _) =
+                                        crate::store::extract_filename_and_ext(&first_url);
+                                    msg_type = "chat.file".to_string();
+                                    raw_json = serde_json::json!({
+                                        "link_src": "Tập tin Zalo",
+                                        "link_title": fname,
+                                        "link_url": first_url,
+                                    })
+                                    .to_string();
+                                }
+                                crate::store::MediaKind::Links => {
+                                    let dom = crate::store::extract_domain_from_url(&first_url);
+                                    msg_type = "chat.link".to_string();
+                                    raw_json = serde_json::json!({
+                                        "link_url": first_url,
+                                        "link_title": if dom.is_empty() { first_url.clone() } else { dom },
+                                    })
+                                    .to_string();
+                                }
                             }
                         }
                     }

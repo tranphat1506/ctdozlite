@@ -238,6 +238,16 @@ pub fn classify_url_kind(url: &str, text_hint: &str, msg_type: &str) -> Option<M
     Some(MediaKind::Links)
 }
 
+/// Parse Zalo mobile backup sticker syntax `"[^cateId,stickerId^]"` into `(cate_id, sticker_id)`.
+pub fn parse_caret_sticker(text: &str) -> Option<(u64, u64)> {
+    let trimmed = text.trim();
+    let inner = trimmed.strip_prefix("[^")?.strip_suffix("^]")?;
+    let (cate_s, stick_s) = inner.split_once(',')?;
+    let cate_id = cate_s.trim().parse::<u64>().ok()?;
+    let sticker_id = stick_s.trim().parse::<u64>().ok()?;
+    Some((cate_id, sticker_id))
+}
+
 /// Derive `(msg_type, raw_json)` metadata from plain message text when `raw_json` is absent.
 pub fn build_media_meta_from_text(text: &str, current_msg_type: &str) -> Option<(String, String)> {
     let urls = extract_http_urls(text);
@@ -515,6 +525,64 @@ impl MessageStore {
                     }
                 }
                 let _ = tx.execute("PRAGMA user_version = 4", []);
+                let _ = tx.commit();
+            }
+        }
+
+        // Migration 5: fix `is_outgoing` for iPhone backup rows that used `CliMsgId` timestamp IDs
+        // (1e12..2.5e12) and convert `"[^cateId,stickerId^]"` sticker codes into `chat.sticker`.
+        if conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? < 5 {
+            let mut sticker_updates: Vec<(String, String)> = Vec::new();
+            if let Ok(mut stmt) =
+                conn.prepare("SELECT msg_id, text FROM messages WHERE text LIKE '[^%,%^]'")
+            {
+                if let Ok(rows) = stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1).unwrap_or_default(),
+                    ))
+                }) {
+                    for (msg_id, text) in rows.flatten() {
+                        if let Some((cate_id, sticker_id)) = parse_caret_sticker(&text) {
+                            let rjson = serde_json::json!({
+                                "cateId": cate_id,
+                                "stickerId": sticker_id,
+                                "type": 7,
+                            })
+                            .to_string();
+                            sticker_updates.push((rjson, msg_id));
+                        }
+                    }
+                }
+            }
+
+            if let Ok(tx) = conn.transaction() {
+                let _ = tx.execute("DROP TRIGGER IF EXISTS trg_messages_au", []);
+                let _ = tx.execute(
+                    "UPDATE messages
+                     SET is_outgoing = 1, sender_name = 'Tôi'
+                     WHERE is_outgoing = 0
+                       AND sender_id = thread_id
+                       AND msg_id GLOB '[0-9]*'
+                       AND CAST(msg_id AS INTEGER) BETWEEN 1000000000000 AND 2500000000000",
+                    [],
+                );
+                if let Ok(mut upd) = tx.prepare(
+                    "UPDATE messages SET msg_type = 'chat.sticker', text = '[Nhãn dán]', raw_json = ?1 WHERE msg_id = ?2",
+                ) {
+                    for (rjson, msg_id) in sticker_updates {
+                        let _ = upd.execute(params![rjson, msg_id]);
+                    }
+                }
+                let _ = tx.execute(
+                    "CREATE TRIGGER IF NOT EXISTS trg_messages_au AFTER UPDATE ON messages BEGIN
+                         DELETE FROM messages_fts WHERE msg_id = old.msg_id;
+                         INSERT INTO messages_fts(msg_id, thread_id, sender_name, text)
+                         VALUES (new.msg_id, new.thread_id, new.sender_name, new.text);
+                     END;",
+                    [],
+                );
+                let _ = tx.execute("PRAGMA user_version = 5", []);
                 let _ = tx.commit();
             }
         }
@@ -1328,10 +1396,17 @@ impl MessageStore {
                                     && cm.ts != 0
                                     && (existing.ts - cm.ts).abs() < 5000)))
                 }) {
+                    if !existing.is_outgoing && cm.is_outgoing {
+                        existing.is_outgoing = true;
+                        existing.sender = cm.sender.clone();
+                    }
                     if existing.sticker_id.is_none() && cm.sticker_id.is_some() {
                         existing.sticker_id = cm.sticker_id;
                         existing.sticker_cate_id = cm.sticker_cate_id;
                         existing.sticker_type = cm.sticker_type;
+                        if existing.text.starts_with("[^") {
+                            existing.text = "[Nhãn dán]".to_string();
+                        }
                     }
                     if existing.reply_to_text.is_none() && cm.reply_to_text.is_some() {
                         existing.reply_to_id = cm.reply_to_id;
@@ -2678,6 +2753,50 @@ mod tests {
         assert_eq!(page.files[0].file_name, "bao_cao_do_an.docx");
         assert_eq!(page.files[0].file_ext, "DOCX");
         assert_eq!(page.links[0].domain, "github.com");
+    }
+
+    #[test]
+    fn test_parse_caret_sticker_and_outgoing_identification() {
+        assert_eq!(parse_caret_sticker("[^10965,30894^]"), Some((10965, 30894)));
+        assert_eq!(parse_caret_sticker("[^61900,98934^]"), Some((61900, 98934)));
+        assert_eq!(parse_caret_sticker("Not a sticker"), None);
+
+        let mut store = MessageStore::open(":memory:").unwrap();
+        let m_out = StoredMessage {
+            msg_id: "1793371838394".into(),
+            thread_id: "t_test".into(),
+            sender_id: "t_test".into(),
+            sender_name: "".into(),
+            text: "Hello from phone".into(),
+            msg_type: "webchat".into(),
+            ts: 1793371838394,
+            is_outgoing: false,
+            raw_json: "".into(),
+        };
+        let m_stk = StoredMessage {
+            msg_id: "8434185103171".into(),
+            thread_id: "t_test".into(),
+            sender_id: "t_test".into(),
+            sender_name: "".into(),
+            text: "[^10965,30894^]".into(),
+            msg_type: "webchat".into(),
+            ts: 1793371836409,
+            is_outgoing: false,
+            raw_json: "".into(),
+        };
+        store.upsert_message(&m_out).unwrap();
+        store.upsert_message(&m_stk).unwrap();
+
+        // Simulate Migration 5
+        let _ = store.conn.execute("PRAGMA user_version = 4", []);
+        let migrated = MessageStore::open(":memory:").unwrap();
+        assert!(
+            migrated
+                .conn
+                .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap()
+                >= 5
+        );
     }
 
     #[test]
