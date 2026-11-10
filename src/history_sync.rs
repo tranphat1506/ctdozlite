@@ -112,7 +112,6 @@ pub fn last_mobile_sync_status() -> Option<String> {
     LAST_MOBILE_SYNC_STATUS.lock().ok().and_then(|g| g.clone())
 }
 
-
 static CURRENT_SYNC_KEYS: std::sync::Mutex<Option<(rsa::RsaPrivateKey, String)>> =
     std::sync::Mutex::new(None);
 
@@ -129,8 +128,8 @@ pub fn get_sync_keys() -> Option<(rsa::RsaPrivateKey, String)> {
         }
     }
     // Fall back to reading persisted RSA key from disk
-    use rsa::pkcs8::{DecodePrivateKey, EncodePublicKey};
     use base64::Engine;
+    use rsa::pkcs8::{DecodePrivateKey, EncodePublicKey};
     if let Ok(bytes) = std::fs::read(sync_rsa_key_path()) {
         if let Ok(priv_key) = rsa::RsaPrivateKey::from_pkcs8_der(&bytes) {
             let pub_key = rsa::RsaPublicKey::from(&priv_key);
@@ -161,9 +160,9 @@ pub fn clear_sync_keys() {
 
 /// Generate or reuse a genuine 2048-bit RSA SubjectPublicKeyInfo (`SPKI`) DER Base64 key.
 pub fn generate_sync_public_key() -> String {
+    use base64::Engine;
     use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
     use rsa::{RsaPrivateKey, RsaPublicKey};
-    use base64::Engine;
 
     // Reuse existing key if one was generated recently and not completed
     if let Some((_, pub_k)) = get_sync_keys() {
@@ -451,7 +450,9 @@ where
     let added = db_added.max(after_total.saturating_sub(before_total));
     let active_threads = threads.iter().filter(|t| !t.messages.is_empty()).count();
     let final_msg = if let Some(phone_note) = last_mobile_sync_status() {
-        format!("{phone_note} · Đã đồng bộ Cloud/Nhóm: +{added} tin nhắn ({active_threads} hội thoại)")
+        format!(
+            "{phone_note} · Đã đồng bộ Cloud/Nhóm: +{added} tin nhắn ({active_threads} hội thoại)"
+        )
     } else {
         format!("✅ Đã gửi yêu cầu tới điện thoại & đồng bộ Cloud/Nhóm: +{added} tin nhắn ({active_threads} hội thoại). Hãy mở Zalo trên điện thoại để xác nhận nếu muốn kéo tin nhắn 1-1 cũ.")
     };
@@ -466,6 +467,7 @@ pub async fn import_mobile_backup_container(
     url: &str,
     encrypted_key: &str,
 ) -> Result<usize> {
+    use crate::store::StoredMessage;
     use aes::cipher::{BlockDecryptMut, KeyIvInit};
     use base64::Engine;
     use rsa::Pkcs1v15Encrypt;
@@ -473,7 +475,6 @@ pub async fn import_mobile_backup_container(
     use serde_json::json;
     use std::collections::HashMap;
     use std::io::Cursor;
-    use crate::store::StoredMessage;
 
     if url.is_empty() {
         anyhow::bail!("empty backup url");
@@ -509,7 +510,10 @@ pub async fn import_mobile_backup_container(
     }
 
     let crypt_data = resp.bytes().await?;
-    eprintln!("[sync] downloaded {} bytes. Decrypting AES container...", crypt_data.len());
+    eprintln!(
+        "[sync] downloaded {} bytes. Decrypting AES container...",
+        crypt_data.len()
+    );
 
     let hex_key: String = raw_key.iter().map(|b| format!("{:02X}", b)).collect();
     let key_32 = &hex_key.as_bytes()[..32];
@@ -600,7 +604,9 @@ pub async fn import_mobile_backup_container(
     });
     let enc_params = s.encoded_params(&noise_body)?;
     let znoise_url = format!("https://zwid.api.zalo.me/api/znoise?{}", s.common_params());
-    let resp = s.post_form(&znoise_url, format!("params={enc_params}")).await?;
+    let resp = s
+        .post_form(&znoise_url, format!("params={enc_params}"))
+        .await?;
     let dec = s.maybe_decrypt(resp, s.session_key_bytes()).await;
 
     let mut id_map: HashMap<String, String> = HashMap::new();
@@ -623,11 +629,19 @@ pub async fn import_mobile_backup_container(
 
     let my_uid = s.login.as_ref().map(|l| l.uin.clone()).unwrap_or_default();
     let my_uin: i64 = my_uid.parse().unwrap_or(0);
-    let my_name = s.login.as_ref().map(|l| l.display_name.clone()).unwrap_or_else(|| "Tôi".into());
+    let my_name = s
+        .login
+        .as_ref()
+        .map(|l| l.display_name.clone())
+        .unwrap_or_else(|| "Tôi".into());
 
     let db_path = crate::store::db_path_for_account(&my_uid);
     let mut store = crate::store::MessageStore::open(&db_path)?;
-    let temp_dir = std::env::temp_dir().join(format!("ctdozlite_sync_{}", crate::param_cipher::random_hex(8)));
+    let temp_dir = std::env::temp_dir().join(format!(
+        "ctdozlite_sync_{}",
+        crate::param_cipher::random_hex(8)
+    ));
+    let _ = std::fs::create_dir_all(&temp_dir);
 
     let mut curr_offset = 0;
     let mut total_imported = 0;
@@ -675,10 +689,27 @@ pub async fn import_mobile_backup_container(
         };
 
         for r in rows.flatten() {
-            let (sender_id_num, cli_msg_id, glb_msg_id, _status, msg_type_num, ts, content_opt, bin_net_opt) = r;
+            let (
+                sender_id_num,
+                cli_msg_id,
+                glb_msg_id,
+                _status,
+                msg_type_num,
+                ts,
+                content_opt,
+                bin_net_opt,
+            ) = r;
             let is_outgoing = sender_id_num == my_uin;
-            let sender_id = if is_outgoing { my_uid.clone() } else { thread_id.clone() };
-            let sender_name = if is_outgoing { my_name.clone() } else { String::new() };
+            let sender_id = if is_outgoing {
+                my_uid.clone()
+            } else {
+                thread_id.clone()
+            };
+            let sender_name = if is_outgoing {
+                my_name.clone()
+            } else {
+                String::new()
+            };
 
             let msg_id = if glb_msg_id > 0 {
                 glb_msg_id.to_string()
@@ -687,7 +718,14 @@ pub async fn import_mobile_backup_container(
             };
 
             let mut text = content_opt.unwrap_or_default().trim().to_string();
-            let mut msg_type = "webchat".to_string();
+            let mut msg_type = match msg_type_num {
+                3 => "chat.photo",
+                10 => "chat.sticker",
+                12 => "chat.link",
+                _ => "webchat",
+            }
+            .to_string();
+            let mut raw_json = String::new();
 
             if text.is_empty() {
                 if let Some(bn) = &bin_net_opt {
@@ -721,6 +759,61 @@ pub async fn import_mobile_backup_container(
                 }
             }
 
+            if let Some((mtype, rjson)) = crate::store::build_media_meta_from_text(&text, &msg_type)
+            {
+                msg_type = mtype;
+                raw_json = rjson;
+            } else if let Some(bn) = &bin_net_opt {
+                let mut ascii = String::with_capacity(bn.len());
+                for &b in bn {
+                    ascii.push(if (0x20..=0x7E).contains(&b) {
+                        b as char
+                    } else {
+                        ' '
+                    });
+                }
+                let bin_urls = crate::store::extract_http_urls(&ascii);
+                if let Some(first_url) = bin_urls.into_iter().next() {
+                    let hint = if text.is_empty() {
+                        first_url.as_str()
+                    } else {
+                        text.as_str()
+                    };
+                    let kind = crate::store::classify_url_kind(&first_url, hint, &msg_type);
+                    match kind {
+                        crate::store::MediaKind::Photos => {
+                            let safe = crate::store::jxl_to_jpg_url(&first_url);
+                            msg_type = "chat.photo".to_string();
+                            raw_json = serde_json::json!({
+                                "link_src": "Hình ảnh Zalo",
+                                "link_url": safe,
+                                "link_thumb": safe,
+                            })
+                            .to_string();
+                        }
+                        crate::store::MediaKind::Files => {
+                            let (fname, _) = crate::store::extract_filename_and_ext(&first_url);
+                            msg_type = "chat.file".to_string();
+                            raw_json = serde_json::json!({
+                                "link_src": "Tập tin Zalo",
+                                "link_title": fname,
+                                "link_url": first_url,
+                            })
+                            .to_string();
+                        }
+                        crate::store::MediaKind::Links => {
+                            let dom = crate::store::extract_domain_from_url(&first_url);
+                            msg_type = "chat.link".to_string();
+                            raw_json = serde_json::json!({
+                                "link_url": first_url,
+                                "link_title": if dom.is_empty() { first_url.clone() } else { dom },
+                            })
+                            .to_string();
+                        }
+                    }
+                }
+            }
+
             let sm = StoredMessage {
                 msg_id,
                 thread_id: thread_id.clone(),
@@ -730,7 +823,7 @@ pub async fn import_mobile_backup_container(
                 msg_type,
                 ts,
                 is_outgoing,
-                raw_json: String::new(),
+                raw_json,
             };
 
             if store.upsert_message(&sm).unwrap_or(false) {
@@ -786,7 +879,11 @@ pub fn generate_sync_v2_keys() -> Result<SyncV2Keys> {
         ek_priv: hex_encode(&ek_priv),
     };
     if let Ok(mut g) = CURRENT_V2_KEYS.lock() {
-        *g = Some(SyncV2KeysRaw { ik_pub, ik_priv, ek_priv });
+        *g = Some(SyncV2KeysRaw {
+            ik_pub,
+            ik_priv,
+            ek_priv,
+        });
     }
     Ok(keys)
 }
@@ -832,7 +929,13 @@ pub async fn import_sync_v2_meta(s: &Session, url: &str) -> Result<SyncV2Meta> {
     let mut session_record: Option<Vec<u8>> = None;
     let mut last: Option<crate::zproto_host::DecryptedMeta> = None;
     for chunk in crate::zproto_host::split_frames(&bytes)? {
-        let m = host.decrypt_metadata(&chunk, &keys.ik_pub, &keys.ik_priv, &keys.ek_priv, session_record.as_deref())?;
+        let m = host.decrypt_metadata(
+            &chunk,
+            &keys.ik_pub,
+            &keys.ik_priv,
+            &keys.ek_priv,
+            session_record.as_deref(),
+        )?;
         session_record = Some(m.session_record.clone());
         last = Some(m);
     }
@@ -843,7 +946,6 @@ pub async fn import_sync_v2_meta(s: &Session, url: &str) -> Result<SyncV2Meta> {
         sender_identity: m.sender_identity,
     })
 }
-
 
 fn current_v2_keys() -> Result<SyncV2KeysRaw> {
     CURRENT_V2_KEYS
@@ -917,7 +1019,9 @@ fn parse_vli(buf: &[u8], mut offset: usize) -> Option<(u64, usize)> {
             return Some((result, offset));
         }
         shift += 7;
-        if shift >= 64 { return None; }
+        if shift >= 64 {
+            return None;
+        }
     }
     None
 }
@@ -946,7 +1050,9 @@ fn parse_message(buf: &[u8]) -> Option<ParsedProtoMsg> {
                 let (len, next) = parse_vli(buf, offset)?;
                 offset = next;
                 let len = len as usize;
-                if offset + len > buf.len() { return None; }
+                if offset + len > buf.len() {
+                    return None;
+                }
                 let bytes = &buf[offset..offset + len];
                 offset += len;
                 match field_num {
@@ -977,7 +1083,9 @@ fn parse_partition(buf: &[u8]) -> Option<ParsedProtoPartition> {
                 let (len, next) = parse_vli(buf, offset)?;
                 offset = next;
                 let len = len as usize;
-                if offset + len > buf.len() { return None; }
+                if offset + len > buf.len() {
+                    return None;
+                }
                 part.id = String::from_utf8_lossy(&buf[offset..offset + len]).into_owned();
                 offset += len;
             }
@@ -985,7 +1093,9 @@ fn parse_partition(buf: &[u8]) -> Option<ParsedProtoPartition> {
                 let (len, next) = parse_vli(buf, offset)?;
                 offset = next;
                 let len = len as usize;
-                if offset + len > buf.len() { return None; }
+                if offset + len > buf.len() {
+                    return None;
+                }
                 if let Some(m) = parse_message(&buf[offset..offset + len]) {
                     part.messages.push(m);
                 }
@@ -1017,14 +1127,20 @@ pub fn decompress_sync_payload(buf: &[u8]) -> Vec<u8> {
     }
     if buf.len() >= 2 && buf[0] == 0x1f && buf[1] == 0x8b {
         let mut out = Vec::new();
-        if flate2::read::GzDecoder::new(buf).read_to_end(&mut out).is_ok() {
+        if flate2::read::GzDecoder::new(buf)
+            .read_to_end(&mut out)
+            .is_ok()
+        {
             return out;
         }
         return buf.to_vec();
     }
     if buf.len() >= 2 && buf[0] == 0x78 {
         let mut out = Vec::new();
-        if flate2::read::ZlibDecoder::new(buf).read_to_end(&mut out).is_ok() {
+        if flate2::read::ZlibDecoder::new(buf)
+            .read_to_end(&mut out)
+            .is_ok()
+        {
             return out;
         }
     }
@@ -1044,7 +1160,9 @@ pub fn parse_sync_chunk(buf: &[u8]) -> Option<Vec<ParsedProtoPartition>> {
                 let (len, next) = parse_vli(buf, offset)?;
                 offset = next;
                 let len = len as usize;
-                if offset + len > buf.len() { return None; }
+                if offset + len > buf.len() {
+                    return None;
+                }
                 if let Some(p) = parse_partition(&buf[offset..offset + len]) {
                     parts.push(p);
                 }
@@ -1099,30 +1217,46 @@ pub async fn import_sync_v2_messages(s: &Session, url: &str) -> Result<usize> {
     let partitions = parse_sync_chunk(&decompressed).unwrap_or_default();
     let db_path = crate::store::db_path_for_account(&uin);
     let mut store = crate::store::MessageStore::open(&db_path)?;
-    let my_name = s.login.as_ref().map(|l| l.display_name.clone()).unwrap_or_else(|| "Tôi".into());
+    let my_name = s
+        .login
+        .as_ref()
+        .map(|l| l.display_name.clone())
+        .unwrap_or_else(|| "Tôi".into());
 
     let mut imported = 0;
     for part in partitions {
         let thread_id = part.id.clone();
         for m in part.messages {
             let is_outgoing = m.sender_id == uin;
-            let sender_name = if is_outgoing { my_name.clone() } else { String::new() };
+            let sender_name = if is_outgoing {
+                my_name.clone()
+            } else {
+                String::new()
+            };
             let msg_id = if !m.global_id.is_empty() && m.global_id != "0" {
                 m.global_id
             } else {
                 m.client_id.to_string()
             };
 
+            let (msg_type, raw_json) =
+                crate::store::build_media_meta_from_text(&m.content, "webchat")
+                    .unwrap_or_else(|| ("webchat".to_string(), String::new()));
+
             let sm = crate::store::StoredMessage {
                 msg_id,
                 thread_id: thread_id.clone(),
-                sender_id: if is_outgoing { uin.clone() } else { thread_id.clone() },
+                sender_id: if is_outgoing {
+                    uin.clone()
+                } else {
+                    thread_id.clone()
+                },
                 sender_name,
                 text: m.content,
-                msg_type: "webchat".into(),
+                msg_type,
                 ts: m.timestamp as i64,
                 is_outgoing,
-                raw_json: String::new(),
+                raw_json,
             };
 
             if store.upsert_message(&sm).unwrap_or(false) {
@@ -1196,11 +1330,13 @@ mod tests {
         let mut rng = rsa::rand_core::OsRng;
         let priv1 = RsaPrivateKey::new(&mut rng, 2048).unwrap();
         let pub1 = RsaPublicKey::from(&priv1);
-        let k1 = base64::engine::general_purpose::STANDARD.encode(pub1.to_public_key_der().unwrap().as_bytes());
+        let k1 = base64::engine::general_purpose::STANDARD
+            .encode(pub1.to_public_key_der().unwrap().as_bytes());
 
         let priv2 = RsaPrivateKey::new(&mut rng, 2048).unwrap();
         let pub2 = RsaPublicKey::from(&priv2);
-        let k2 = base64::engine::general_purpose::STANDARD.encode(pub2.to_public_key_der().unwrap().as_bytes());
+        let k2 = base64::engine::general_purpose::STANDARD
+            .encode(pub2.to_public_key_der().unwrap().as_bytes());
 
         assert_ne!(k1, k2);
         assert!(
@@ -1213,7 +1349,6 @@ mod tests {
         assert_eq!(raw.len(), 294);
         assert_eq!(&raw[raw.len() - 5..], &[0x02, 0x03, 0x01, 0x00, 0x01]);
     }
-
 
     #[test]
     fn extract_mobile_sync_controls_parses_v1_and_v2_events() {

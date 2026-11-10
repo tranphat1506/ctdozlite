@@ -29,7 +29,10 @@ pub fn list_saved_accounts(current_uin: &str) -> Vec<AccountProfile> {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) == Some("json") {
-            let file_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+            let file_stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
             if file_stem.ends_with("_threads") {
                 continue;
             }
@@ -87,7 +90,10 @@ pub fn save_current_account_snapshot(uin: &str) -> Result<()> {
         let _ = std::fs::copy("session.json", dir.join(format!("{uin}.json")));
     }
     if Path::new("threads_cache.json").exists() {
-        let _ = std::fs::copy("threads_cache.json", dir.join(format!("{uin}_threads.json")));
+        let _ = std::fs::copy(
+            "threads_cache.json",
+            dir.join(format!("{uin}_threads.json")),
+        );
     }
     if Path::new("zalo_history.db").exists() {
         let _ = std::fs::copy("zalo_history.db", dir.join(format!("{uin}_history.db")));

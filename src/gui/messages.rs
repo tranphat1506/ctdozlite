@@ -3412,7 +3412,6 @@ mod quote_navigation_tests {
         assert!(matches!(action, Some(BubbleAction::Reply)));
     }
 
-
     #[test]
     fn extract_photo_user_caption_filters_raw_image_filenames() {
         let raw_filename_msg = ChatMessage {

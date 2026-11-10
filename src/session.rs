@@ -18,7 +18,6 @@ pub const ZPW_VER: &str = "694";
 pub const ZPW_TYPE: &str = "30";
 pub const CONFIG_DOMAIN: &str = "zaloapp.com";
 
-
 // ---------------------------------------------------------------------------
 // Client-Side Privacy Blocker (block outbound typing / delivered / seen)
 // ---------------------------------------------------------------------------

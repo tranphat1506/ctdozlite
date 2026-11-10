@@ -235,6 +235,12 @@ pub enum WorkerCmd {
     SwitchAccount {
         target_uin: String,
     },
+    LoadConversationMedia {
+        thread_id: String,
+        kind: crate::store::MediaKind,
+        offset: usize,
+        limit: usize,
+    },
 }
 
 pub(super) static WORKER_TX: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<WorkerCmd>> =
@@ -3806,6 +3812,33 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                             tokio::spawn(async move {
                                 let s = session_clone.lock().await.clone();
                                 let _ = crate::chat::send_seen_v2(&s, &thread_id, is_group, &last_msg_id).await;
+                            });
+                        }
+                        WorkerCmd::LoadConversationMedia {
+                            thread_id,
+                            kind,
+                            offset,
+                            limit,
+                        } => {
+                            let session_clone = session.clone();
+                            let gui_tx_clone = gui_tx.clone();
+                            let ctx_clone = egui_ctx.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let uin = {
+                                    session_clone
+                                        .blocking_lock()
+                                        .login
+                                        .as_ref()
+                                        .map(|l| l.uin.clone())
+                                        .unwrap_or_default()
+                                };
+                                let db_path = crate::store::db_path_for_account(&uin);
+                                if let Ok(store) = crate::store::MessageStore::open(&db_path) {
+                                    if let Ok(page) = store.conversation_media_page(&thread_id, kind, offset, limit) {
+                                        let _ = gui_tx_clone.send(GuiEvent::ConversationMediaLoaded(page));
+                                        ctx_clone.request_repaint();
+                                    }
+                                }
                             });
                         }
                     }

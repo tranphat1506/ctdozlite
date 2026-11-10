@@ -248,6 +248,7 @@ pub enum GuiEvent {
         avatar: Option<String>,
         threads: Vec<Thread>,
     },
+    ConversationMediaLoaded(crate::store::MediaPageResult),
 }
 
 fn phone_sync_completion_message(
@@ -708,7 +709,7 @@ pub struct ZaloGuiApp {
     phone_sync_status: String,
     last_typing_sent_at: Option<(String, std::time::Instant)>,
     last_synced_icon_unread: Option<usize>,
-    info_drawer_tab: DrawerMediaTab,
+    drawer_media: DrawerMediaState,
 
     // Background channels
     event_rx: Receiver<GuiEvent>,
@@ -729,6 +730,124 @@ pub(crate) enum DrawerMediaTab {
     Photos,
     Files,
     Links,
+}
+
+impl From<DrawerMediaTab> for crate::store::MediaKind {
+    fn from(tab: DrawerMediaTab) -> Self {
+        match tab {
+            DrawerMediaTab::Photos => crate::store::MediaKind::Photos,
+            DrawerMediaTab::Files => crate::store::MediaKind::Files,
+            DrawerMediaTab::Links => crate::store::MediaKind::Links,
+        }
+    }
+}
+
+/// Centralized state store for the Conversation Info Drawer Media Hub.
+/// Keeps SQLite reads off the UI thread and manages Telegram-style incremental pagination.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DrawerMediaState {
+    pub thread_id: String,
+    pub active_tab: DrawerMediaTab,
+    pub photos: Vec<crate::store::MediaPhotoItem>,
+    pub files: Vec<crate::store::MediaFileItem>,
+    pub links: Vec<crate::store::MediaLinkItem>,
+    pub total_photos: usize,
+    pub total_files: usize,
+    pub total_links: usize,
+    pub has_more_photos: bool,
+    pub has_more_files: bool,
+    pub has_more_links: bool,
+    pub loading_initial: bool,
+    pub loading_more: bool,
+    pub requested_for_thread: Option<String>,
+}
+
+impl DrawerMediaState {
+    pub const PAGE_SIZE: usize = 30;
+
+    pub fn prepare_for_thread(&mut self, thread_id: &str) {
+        if self.thread_id != thread_id {
+            let tab = self.active_tab;
+            *self = Self {
+                thread_id: thread_id.to_string(),
+                active_tab: tab,
+                loading_initial: true,
+                requested_for_thread: Some(thread_id.to_string()),
+                ..Default::default()
+            };
+        }
+    }
+
+    pub fn apply_page(&mut self, page: crate::store::MediaPageResult) {
+        if page.thread_id != self.thread_id {
+            return;
+        }
+        self.total_photos = page.total_photos;
+        self.total_files = page.total_files;
+        self.total_links = page.total_links;
+
+        if page.offset == 0 {
+            self.photos = page.photos;
+            self.files = page.files;
+            self.links = page.links;
+            self.has_more_photos = page.has_more_photos;
+            self.has_more_files = page.has_more_files;
+            self.has_more_links = page.has_more_links;
+        } else {
+            match page.kind {
+                crate::store::MediaKind::Photos => {
+                    for item in page.photos {
+                        if !self.photos.iter().any(|p| p.msg_id == item.msg_id) {
+                            self.photos.push(item);
+                        }
+                    }
+                    self.has_more_photos = page.has_more_photos;
+                }
+                crate::store::MediaKind::Files => {
+                    for item in page.files {
+                        if !self.files.iter().any(|f| f.msg_id == item.msg_id) {
+                            self.files.push(item);
+                        }
+                    }
+                    self.has_more_files = page.has_more_files;
+                }
+                crate::store::MediaKind::Links => {
+                    for item in page.links {
+                        if !self.links.iter().any(|l| l.msg_id == item.msg_id) {
+                            self.links.push(item);
+                        }
+                    }
+                    self.has_more_links = page.has_more_links;
+                }
+            }
+        }
+        self.loading_initial = false;
+        self.loading_more = false;
+    }
+
+    pub fn total_for(&self, tab: DrawerMediaTab) -> usize {
+        match tab {
+            DrawerMediaTab::Photos => self.total_photos,
+            DrawerMediaTab::Files => self.total_files,
+            DrawerMediaTab::Links => self.total_links,
+        }
+    }
+
+    pub fn loaded_for(&self, tab: DrawerMediaTab) -> usize {
+        match tab {
+            DrawerMediaTab::Photos => self.photos.len(),
+            DrawerMediaTab::Files => self.files.len(),
+            DrawerMediaTab::Links => self.links.len(),
+        }
+    }
+
+    pub fn has_more_for(&self, tab: DrawerMediaTab) -> bool {
+        match tab {
+            DrawerMediaTab::Photos => self.has_more_photos,
+            DrawerMediaTab::Files => self.has_more_files,
+            DrawerMediaTab::Links => self.has_more_links,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -849,7 +968,8 @@ impl ZaloGuiApp {
             threads,
             reaction_inbox: crate::reactions::ReactionInbox::default(),
 
-            selected_thread_index,            thread_filter: ThreadFilter::All,
+            selected_thread_index,
+            thread_filter: ThreadFilter::All,
             search_query: String::new(),
             input_message: String::new(),
             replying_to: None,
@@ -972,7 +1092,7 @@ impl ZaloGuiApp {
             phone_sync_status: String::new(),
             last_typing_sent_at: None,
             last_synced_icon_unread: None,
-            info_drawer_tab: DrawerMediaTab::Photos,
+            drawer_media: DrawerMediaState::default(),
             event_rx: rx,
             event_tx: tx.clone(),
             chat_render_window: (String::new(), CHAT_RENDER_STEP),
@@ -1165,7 +1285,8 @@ impl ZaloGuiApp {
                                 }
                                 let added = existing.messages.len().saturating_sub(old_len);
                                 if added > 0 {
-                                    let seen = existing.unread.last_seen_id.as_deref().unwrap_or("");
+                                    let seen =
+                                        existing.unread.last_seen_id.as_deref().unwrap_or("");
                                     let inc_cnt = existing
                                         .messages
                                         .iter()
@@ -1408,6 +1529,7 @@ impl ZaloGuiApp {
                     self.status_msg = format!("Đã chuyển sang tài khoản {name}");
                     self.show_toast(format!("Đã chuyển sang tài khoản {name}"));
                     self.history_reached_start.clear();
+                    self.drawer_media = DrawerMediaState::default();
                 }
                 GuiEvent::MessageSent {
                     client_message_id,
@@ -2286,8 +2408,7 @@ impl ZaloGuiApp {
                     } else {
                         // The server is authoritative: match each topic back to its bubble and drop
                         // stale local pin flags inside this thread.
-                        let pinned_ids: Vec<String> =
-                            topics.iter().map(|t| t.id.clone()).collect();
+                        let pinned_ids: Vec<String> = topics.iter().map(|t| t.id.clone()).collect();
                         if let Some(t) = self.threads.iter_mut().find(|t| t.id == thread_id) {
                             let mut changed = false;
                             for m in t.messages.iter_mut() {
@@ -2359,6 +2480,10 @@ impl ZaloGuiApp {
                         self.show_toast(msg);
                     }
                 },
+                GuiEvent::ConversationMediaLoaded(page) => {
+                    self.drawer_media.apply_page(page);
+                    ctx.request_repaint();
+                }
             }
         }
     }
@@ -3224,9 +3349,11 @@ impl ZaloGuiApp {
                                             ui.add_space(4.0);
                                             ui.add_sized(
                                                 [ui.available_width(), 34.0],
-                                                egui::TextEdit::singleline(&mut self.password_input)
-                                                    .password(true)
-                                                    .hint_text("Nhập mật khẩu Zalo"),
+                                                egui::TextEdit::singleline(
+                                                    &mut self.password_input,
+                                                )
+                                                .password(true)
+                                                .hint_text("Nhập mật khẩu Zalo"),
                                             );
                                             ui.add_space(16.0);
 

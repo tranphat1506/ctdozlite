@@ -1134,7 +1134,8 @@ impl ZaloGuiApp {
                                 );
 
                                 // Pin icon + Timestamp (top-right)
-                                let display_time = t.sidebar_timestamp(crate::login::unix_now() as i64 * 1000);
+                                let display_time =
+                                    t.sidebar_timestamp(crate::login::unix_now() as i64 * 1000);
                                 let time_right = row_rect.right() - 9.0;
                                 if !display_time.is_empty() {
                                     let tw = ui.fonts(|f| {
@@ -1938,15 +1939,20 @@ impl ZaloGuiApp {
 
         if show_info_drawer {
             if let Some((ref d_id, ref d_name, ref d_ava, d_is_group, d_msg_count)) = thread_meta {
-                let uin_str = self.user_uin.clone();
-                let (shared_photos, shared_files, shared_links) = {
-                    let db_path = crate::store::db_path_for_account(&uin_str);
-                    if let Ok(store) = crate::store::MessageStore::open(&db_path) {
-                        store.conversation_media_items(d_id).unwrap_or_default()
-                    } else {
-                        (Vec::new(), Vec::new(), Vec::new())
+                // Ensure conversation media state is initialized for this thread asynchronously
+                if self.drawer_media.thread_id != *d_id
+                    && self.drawer_media.requested_for_thread.as_deref() != Some(d_id.as_str())
+                {
+                    self.drawer_media.prepare_for_thread(d_id);
+                    if let Some(tx) = WORKER_TX.get() {
+                        let _ = tx.send(WorkerCmd::LoadConversationMedia {
+                            thread_id: d_id.clone(),
+                            kind: self.drawer_media.active_tab.into(),
+                            offset: 0,
+                            limit: crate::gui::DrawerMediaState::PAGE_SIZE,
+                        });
                     }
-                };
+                }
 
                 egui::SidePanel::right("conversation_info_drawer")
                     .resizable(false)
@@ -2350,20 +2356,26 @@ impl ZaloGuiApp {
                             ui.add(egui::Separator::default().spacing(1.0));
                         }
 
-                        // Media Hub: Tabs for Photos, Files, Links
+                        // Media Hub: Telegram-style Tabs for Photos, Files, Links
                         egui::Frame::none()
-                            .inner_margin(Margin::symmetric(16.0, 10.0))
+                            .inner_margin(Margin::symmetric(14.0, 8.0))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
-                                    let btn_w = (ui.available_width() - 12.0) / 3.0;
-                                    for (tab, title, count) in [
-                                        (crate::gui::DrawerMediaTab::Photos, "Ảnh", shared_photos.len()),
-                                        (crate::gui::DrawerMediaTab::Files, "Tài liệu", shared_files.len()),
-                                        (crate::gui::DrawerMediaTab::Links, "Link", shared_links.len()),
+                                    let btn_w = (ui.available_width() - 8.0) / 3.0;
+                                    for (tab, title) in [
+                                        (crate::gui::DrawerMediaTab::Photos, "Ảnh"),
+                                        (crate::gui::DrawerMediaTab::Files, "Tài liệu"),
+                                        (crate::gui::DrawerMediaTab::Links, "Link"),
                                     ] {
-                                        let active = self.info_drawer_tab == tab;
+                                        let active = self.drawer_media.active_tab == tab;
+                                        let count = self.drawer_media.total_for(tab);
+                                        let btn_label = if count > 0 {
+                                            format!("{title} ({count})")
+                                        } else {
+                                            title.to_string()
+                                        };
                                         let btn = egui::Button::new(
-                                            RichText::new(format!("{title} ({count})"))
+                                            RichText::new(btn_label)
                                                 .size(11.2)
                                                 .color(if active { Color32::WHITE } else { pal.text_secondary })
                                                 .strong(),
@@ -2371,109 +2383,366 @@ impl ZaloGuiApp {
                                         .fill(if active { pal.primary } else { pal.bg_input })
                                         .rounding(Rounding::same(6.0))
                                         .min_size(Vec2::new(btn_w, 24.0));
-                                        if ui.add(btn).clicked() {
-                                            self.info_drawer_tab = tab;
+                                        if ui.add(btn).clicked() && self.drawer_media.active_tab != tab {
+                                            self.drawer_media.active_tab = tab;
+                                            if self.drawer_media.loaded_for(tab) == 0
+                                                && self.drawer_media.total_for(tab) > 0
+                                            {
+                                                self.drawer_media.loading_initial = true;
+                                                if let Some(tx) = WORKER_TX.get() {
+                                                    let _ = tx.send(WorkerCmd::LoadConversationMedia {
+                                                        thread_id: d_id.clone(),
+                                                        kind: tab.into(),
+                                                        offset: 0,
+                                                        limit: crate::gui::DrawerMediaState::PAGE_SIZE,
+                                                    });
+                                                }
+                                            }
                                         }
                                     }
                                 });
                                 ui.add_space(8.0);
 
-                                match self.info_drawer_tab {
-                                    crate::gui::DrawerMediaTab::Photos => {
-                                        if shared_photos.is_empty() {
-                                            ui.label(RichText::new("Chưa có ảnh hoặc video chia sẻ.").size(11.5).color(pal.text_muted));
-                                        } else {
-                                            ui.horizontal_wrapped(|ui| {
-                                                ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-                                                for (tkey, thumb_u, full_u, ptitle) in &shared_photos {
-                                                    if !self.sticker_textures.contains_key(tkey)
-                                                        && self.loading_stickers.insert(tkey.clone())
-                                                    {
-                                                        if let Some(tx) = WORKER_TX.get() {
-                                                            let _ = tx.send(WorkerCmd::FetchStickerImage {
-                                                                key: tkey.clone(),
-                                                                url: thumb_u.clone(),
-                                                            });
+                                let scroll_h = (ui.available_height() - 84.0).max(120.0);
+                                egui::ScrollArea::vertical()
+                                    .id_salt("drawer_media_scroll")
+                                    .auto_shrink([false; 2])
+                                    .max_height(scroll_h)
+                                    .show(ui, |ui| {
+                                        let current_tab = self.drawer_media.active_tab;
+
+                                        if self.drawer_media.loading_initial {
+                                            ui.add_space(20.0);
+                                            ui.vertical_centered(|ui| {
+                                                ui.spinner();
+                                                ui.add_space(6.0);
+                                                ui.label(RichText::new("Đang tải dữ liệu…").size(11.5).color(pal.text_muted));
+                                            });
+                                            return;
+                                        }
+
+                                        match current_tab {
+                                            crate::gui::DrawerMediaTab::Photos => {
+                                                if self.drawer_media.photos.is_empty() {
+                                                    ui.add_space(16.0);
+                                                    ui.vertical_centered(|ui| {
+                                                        ui.label(RichText::new("Chưa có ảnh hoặc video chia sẻ.").size(11.5).color(pal.text_muted));
+                                                    });
+                                                } else {
+                                                    let avail_w = ui.available_width() - 4.0;
+                                                    let tile_w = ((avail_w - 8.0) / 3.0).floor().clamp(60.0, 96.0);
+                                                    let mut network_budget = 6;
+                                                    let mut pending_images = false;
+                                                    let mut click_photo_action: Option<(String, String, String, String)> = None;
+
+                                                    ui.horizontal_wrapped(|ui| {
+                                                        ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+                                                        for p in &self.drawer_media.photos {
+                                                            let (cell_r, cell_resp) = ui.allocate_exact_size(Vec2::splat(tile_w), Sense::click());
+                                                            let is_visible = ui.is_rect_visible(cell_r);
+
+                                                            // Lazy network-throttled thumbnail fetching for visible tiles
+                                                            if is_visible
+                                                                && network_budget > 0
+                                                                && !self.sticker_textures.contains_key(&p.thumb_key)
+                                                                && self.loading_stickers.insert(p.thumb_key.clone())
+                                                            {
+                                                                network_budget -= 1;
+                                                                if let Some(tx) = WORKER_TX.get() {
+                                                                    let _ = tx.send(WorkerCmd::FetchStickerImage {
+                                                                        key: p.thumb_key.clone(),
+                                                                        url: p.thumb_url.clone(),
+                                                                    });
+                                                                }
+                                                            }
+
+                                                            if let Some(tex) = self.sticker_textures.get(&p.thumb_key) {
+                                                                ui.painter().rect_filled(cell_r, Rounding::same(6.0), pal.bg_elevated);
+                                                                ui.painter().image(
+                                                                    tex.id(),
+                                                                    cell_r,
+                                                                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                                                                    Color32::WHITE,
+                                                                );
+                                                            } else {
+                                                                pending_images = true;
+                                                                let pulse = (ctx.input(|i| i.time) * 3.5).sin().abs() as f32;
+                                                                let shimmer_bg = Color32::from_rgb(
+                                                                    (pal.bg_elevated.r() as f32 * (0.8 + 0.2 * pulse)) as u8,
+                                                                    (pal.bg_elevated.g() as f32 * (0.8 + 0.2 * pulse)) as u8,
+                                                                    (pal.bg_elevated.b() as f32 * (0.8 + 0.2 * pulse)) as u8,
+                                                                );
+                                                                ui.painter().rect_filled(cell_r, Rounding::same(6.0), shimmer_bg);
+                                                                draw_icon_image(ui.painter(), cell_r.center(), 18.0, pal.text_muted);
+                                                            }
+
+                                                            let border_col = if cell_resp.hovered() {
+                                                                pal.primary
+                                                            } else {
+                                                                pal.border
+                                                            };
+                                                            ui.painter().rect_stroke(
+                                                                cell_r,
+                                                                Rounding::same(6.0),
+                                                                Stroke::new(1.0_f32, border_col),
+                                                            );
+
+                                                            if cell_resp
+                                                                .on_hover_cursor(CursorIcon::PointingHand)
+                                                                .on_hover_text("Xem ảnh phóng to")
+                                                                .clicked()
+                                                            {
+                                                                click_photo_action = Some((
+                                                                    p.thumb_key.clone(),
+                                                                    p.full_url.clone(),
+                                                                    p.title.clone(),
+                                                                    p.time_str.clone(),
+                                                                ));
+                                                            }
                                                         }
-                                                    }
-                                                    let (cell_r, cell_resp) = ui.allocate_exact_size(Vec2::splat(74.0), Sense::click());
-                                                    ui.painter().rect_filled(cell_r, Rounding::same(8.0), pal.bg_elevated);
-                                                    if let Some(tex) = self.sticker_textures.get(tkey) {
-                                                        ui.painter().image(
-                                                            tex.id(),
-                                                            cell_r,
-                                                            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                                                            Color32::WHITE,
-                                                        );
-                                                    } else {
-                                                        draw_icon_image(ui.painter(), cell_r.center(), 20.0, pal.text_muted);
-                                                    }
-                                                    ui.painter().rect_stroke(
-                                                        cell_r,
-                                                        Rounding::same(8.0),
-                                                        Stroke::new(1.0_f32, if cell_resp.hovered() { pal.primary } else { pal.border }),
-                                                    );
-                                                    if cell_resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Xem ảnh phóng to").clicked() {
+                                                    });
+
+                                                    if let Some((tkey, full_u, ptitle, ptime)) = click_photo_action {
                                                         self.image_viewer = Some(ImageViewerModal {
-                                                            tex_key: tkey.clone(),
-                                                            hd_tex_key: self.request_hd_texture(full_u),
-                                                            full_url: full_u.clone(),
-                                                            title: ptitle.clone(),
+                                                            tex_key: tkey,
+                                                            hd_tex_key: self.request_hd_texture(&full_u),
+                                                            full_url: full_u,
+                                                            title: ptitle,
                                                             sender: d_name.clone(),
-                                                            time: String::new(),
+                                                            time: ptime,
                                                             zoom: 1.0,
                                                             pan: Vec2::ZERO,
                                                         });
                                                     }
+
+                                                    if pending_images {
+                                                        ctx.request_repaint();
+                                                    }
                                                 }
-                                            });
-                                        }
-                                    }
-                                    crate::gui::DrawerMediaTab::Files => {
-                                        if shared_files.is_empty() {
-                                            ui.label(RichText::new("Chưa có tài liệu/file nào.").size(11.5).color(pal.text_muted));
-                                        } else {
-                                            ui.vertical(|ui| {
-                                                for (fname, ftime, furl) in &shared_files {
-                                                    let row_resp = ui.horizontal(|ui| {
-                                                        ui.label(RichText::new("📄").size(14.0));
-                                                        ui.vertical(|ui| {
-                                                            ui.label(RichText::new(truncate_chars(fname, 22)).size(12.0).color(pal.text_primary).strong());
-                                                            ui.label(RichText::new(ftime).size(10.5).color(pal.text_muted));
-                                                        });
-                                                    }).response;
-                                                    if row_resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(format!("Mở file: {fname}")).clicked() {
-                                                        if !furl.is_empty() {
-                                                            open_external_url(furl);
+                                            }
+                                            crate::gui::DrawerMediaTab::Files => {
+                                                if self.drawer_media.files.is_empty() {
+                                                    ui.add_space(16.0);
+                                                    ui.vertical_centered(|ui| {
+                                                        ui.label(RichText::new("Chưa có tài liệu hoặc tệp tin nào.").size(11.5).color(pal.text_muted));
+                                                    });
+                                                } else {
+                                                    let mut file_action: Option<(String, String)> = None;
+                                                    ui.vertical(|ui| {
+                                                        ui.spacing_mut().item_spacing = Vec2::new(0.0, 6.0);
+                                                        for f in &self.drawer_media.files {
+                                                            let (card_rect, card_resp) = ui.allocate_exact_size(
+                                                                Vec2::new(ui.available_width(), 46.0),
+                                                                Sense::click(),
+                                                            );
+                                                            let bg = if card_resp.hovered() {
+                                                                pal.bg_hover
+                                                            } else {
+                                                                pal.bg_elevated
+                                                            };
+                                                            ui.painter().rect_filled(card_rect, Rounding::same(8.0), bg);
+                                                            ui.painter().rect_stroke(
+                                                                card_rect,
+                                                                Rounding::same(8.0),
+                                                                Stroke::new(1.0_f32, if card_resp.hovered() { pal.primary } else { pal.border }),
+                                                            );
+
+                                                            // Telegram-style colored file extension badge
+                                                            let badge_rect = Rect::from_min_size(
+                                                                Pos2::new(card_rect.left() + 6.0, card_rect.top() + 6.0),
+                                                                Vec2::new(34.0, 34.0),
+                                                            );
+                                                            let badge_color = match f.file_ext.as_str() {
+                                                                "PDF" => Color32::from_rgb(211, 47, 47),
+                                                                "DOC" | "DOCX" => Color32::from_rgb(25, 118, 210),
+                                                                "XLS" | "XLSX" | "CSV" => Color32::from_rgb(56, 142, 60),
+                                                                "ZIP" | "RAR" | "7Z" | "TAR" | "GZ" => Color32::from_rgb(123, 31, 162),
+                                                                "AMR" | "MP3" | "WAV" | "M4A" | "OGG" => Color32::from_rgb(0, 121, 107),
+                                                                "MP4" | "MOV" | "MKV" => Color32::from_rgb(48, 63, 159),
+                                                                "APK" | "EXE" => Color32::from_rgb(230, 81, 0),
+                                                                _ => Color32::from_rgb(84, 110, 122),
+                                                            };
+                                                            ui.painter().rect_filled(badge_rect, Rounding::same(6.0), badge_color);
+                                                            let badge_text = if f.file_ext.len() <= 4 { f.file_ext.clone() } else { f.file_ext.chars().take(3).collect() };
+                                                            ui.painter().text(
+                                                                badge_rect.center(),
+                                                                egui::Align2::CENTER_CENTER,
+                                                                badge_text,
+                                                                FontId::monospace(9.5),
+                                                                Color32::WHITE,
+                                                            );
+
+                                                            // File name and subtitle
+                                                            let text_left = badge_rect.right() + 8.0;
+                                                            let clean_name = truncate_chars(&f.file_name, 26);
+                                                            ui.painter().text(
+                                                                Pos2::new(text_left, card_rect.top() + 14.0),
+                                                                egui::Align2::LEFT_CENTER,
+                                                                clean_name,
+                                                                FontId::proportional(12.0),
+                                                                pal.text_primary,
+                                                            );
+
+                                                            let sub_info = if f.time_str.is_empty() {
+                                                                format!(".{}", f.file_ext.to_lowercase())
+                                                            } else {
+                                                                format!(".{} · {}", f.file_ext.to_lowercase(), f.time_str)
+                                                            };
+                                                            ui.painter().text(
+                                                                Pos2::new(text_left, card_rect.top() + 30.0),
+                                                                egui::Align2::LEFT_CENTER,
+                                                                sub_info,
+                                                                FontId::proportional(10.5),
+                                                                pal.text_muted,
+                                                            );
+
+                                                            if card_resp
+                                                                .on_hover_cursor(CursorIcon::PointingHand)
+                                                                .on_hover_text(format!("Tải / Mở tệp: {}", f.file_name))
+                                                                .clicked()
+                                                            {
+                                                                file_action = Some((f.file_name.clone(), f.file_url.clone()));
+                                                            }
+                                                        }
+                                                    });
+
+                                                    if let Some((fname, furl)) = file_action {
+                                                        if furl.is_empty() {
+                                                            self.show_toast("Tệp này không có đường dẫn tải trong bản sao lưu");
+                                                        } else if furl.contains("sharepoint.com") || furl.contains("drive.google") {
+                                                            open_external_url(&furl);
+                                                        } else if let Some(tx) = WORKER_TX.get() {
+                                                            self.show_toast(format!("⏳ Đang tải tập tin \"{fname}\"…"));
+                                                            let _ = tx.send(WorkerCmd::DownloadFile {
+                                                                url: furl,
+                                                                file_name: fname,
+                                                                download_dir: self.settings.download_dir.clone(),
+                                                            });
                                                         }
                                                     }
-                                                    ui.add_space(4.0);
                                                 }
-                                            });
-                                        }
-                                    }
-                                    crate::gui::DrawerMediaTab::Links => {
-                                        if shared_links.is_empty() {
-                                            ui.label(RichText::new("Chưa có liên kết chia sẻ.").size(11.5).color(pal.text_muted));
-                                        } else {
-                                            ui.vertical(|ui| {
-                                                for (ltitle, lurl) in &shared_links {
-                                                    let row_resp = ui.horizontal(|ui| {
-                                                        ui.label(RichText::new("🔗").size(13.0));
-                                                        ui.vertical(|ui| {
-                                                            ui.label(RichText::new(truncate_chars(ltitle, 22)).size(12.0).color(pal.primary_hover).strong());
-                                                            ui.label(RichText::new(truncate_chars(lurl, 26)).size(10.5).color(pal.text_muted));
-                                                        });
-                                                    }).response;
-                                                    if row_resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(lurl).clicked() {
-                                                        open_external_url(lurl);
-                                                    }
-                                                    ui.add_space(4.0);
+                                            }
+                                            crate::gui::DrawerMediaTab::Links => {
+                                                if self.drawer_media.links.is_empty() {
+                                                    ui.add_space(16.0);
+                                                    ui.vertical_centered(|ui| {
+                                                        ui.label(RichText::new("Chưa có liên kết chia sẻ nào.").size(11.5).color(pal.text_muted));
+                                                    });
+                                                } else {
+                                                    ui.vertical(|ui| {
+                                                        ui.spacing_mut().item_spacing = Vec2::new(0.0, 6.0);
+                                                        for l in &self.drawer_media.links {
+                                                            let (card_rect, card_resp) = ui.allocate_exact_size(
+                                                                Vec2::new(ui.available_width(), 46.0),
+                                                                Sense::click(),
+                                                            );
+                                                            let bg = if card_resp.hovered() {
+                                                                pal.bg_hover
+                                                            } else {
+                                                                pal.bg_elevated
+                                                            };
+                                                            ui.painter().rect_filled(card_rect, Rounding::same(8.0), bg);
+                                                            ui.painter().rect_stroke(
+                                                                card_rect,
+                                                                Rounding::same(8.0),
+                                                                Stroke::new(1.0_f32, if card_resp.hovered() { pal.primary } else { pal.border }),
+                                                            );
+
+                                                            // Telegram-style domain badge with domain initial
+                                                            let badge_rect = Rect::from_min_size(
+                                                                Pos2::new(card_rect.left() + 6.0, card_rect.top() + 6.0),
+                                                                Vec2::new(34.0, 34.0),
+                                                            );
+                                                            let hash = l.domain.bytes().fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
+                                                            let badge_col = match hash % 5 {
+                                                                0 => Color32::from_rgb(30, 136, 229),
+                                                                1 => Color32::from_rgb(67, 160, 71),
+                                                                2 => Color32::from_rgb(142, 36, 170),
+                                                                3 => Color32::from_rgb(229, 57, 53),
+                                                                _ => Color32::from_rgb(0, 137, 123),
+                                                            };
+                                                            ui.painter().rect_filled(badge_rect, Rounding::same(6.0), badge_col);
+                                                            let initial = l.domain.chars().next().unwrap_or('L').to_ascii_uppercase().to_string();
+                                                            ui.painter().text(
+                                                                badge_rect.center(),
+                                                                egui::Align2::CENTER_CENTER,
+                                                                initial,
+                                                                FontId::proportional(14.0),
+                                                                Color32::WHITE,
+                                                            );
+
+                                                            // Title and URL domain
+                                                            let text_left = badge_rect.right() + 8.0;
+                                                            let clean_title = truncate_chars(&l.title, 26);
+                                                            ui.painter().text(
+                                                                Pos2::new(text_left, card_rect.top() + 14.0),
+                                                                egui::Align2::LEFT_CENTER,
+                                                                clean_title,
+                                                                FontId::proportional(12.0),
+                                                                pal.text_primary,
+                                                            );
+
+                                                            let sub_info = if l.time_str.is_empty() {
+                                                                truncate_chars(&l.domain, 24).to_string()
+                                                            } else {
+                                                                format!("{} · {}", truncate_chars(&l.domain, 16), l.time_str)
+                                                            };
+                                                            ui.painter().text(
+                                                                Pos2::new(text_left, card_rect.top() + 30.0),
+                                                                egui::Align2::LEFT_CENTER,
+                                                                sub_info,
+                                                                FontId::proportional(10.5),
+                                                                pal.primary_hover,
+                                                            );
+
+                                                            if card_resp
+                                                                .on_hover_cursor(CursorIcon::PointingHand)
+                                                                .on_hover_text(&l.url)
+                                                                .clicked()
+                                                            {
+                                                                open_external_url(&l.url);
+                                                            }
+                                                        }
+                                                    });
                                                 }
-                                            });
+                                            }
                                         }
-                                    }
-                                }
+
+                                        // Telegram-style pagination footer
+                                        if self.drawer_media.loading_more {
+                                            ui.add_space(10.0);
+                                            ui.vertical_centered(|ui| {
+                                                ui.spinner();
+                                                ui.label(RichText::new("Đang tải thêm…").size(10.5).color(pal.text_muted));
+                                            });
+                                        } else if self.drawer_media.has_more_for(current_tab) {
+                                            ui.add_space(10.0);
+                                            let loaded = self.drawer_media.loaded_for(current_tab);
+                                            let total = self.drawer_media.total_for(current_tab);
+                                            let more_btn = egui::Button::new(
+                                                RichText::new(format!("Tải thêm ({loaded}/{total})…"))
+                                                    .size(11.0)
+                                                    .color(pal.primary_hover),
+                                            )
+                                            .fill(pal.bg_elevated)
+                                            .stroke(Stroke::new(1.0_f32, pal.border))
+                                            .rounding(Rounding::same(6.0))
+                                            .min_size(Vec2::new(ui.available_width(), 26.0));
+
+                                            if ui.add(more_btn).on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                                                self.drawer_media.loading_more = true;
+                                                if let Some(tx) = WORKER_TX.get() {
+                                                    let _ = tx.send(WorkerCmd::LoadConversationMedia {
+                                                        thread_id: d_id.clone(),
+                                                        kind: current_tab.into(),
+                                                        offset: loaded,
+                                                        limit: crate::gui::DrawerMediaState::PAGE_SIZE,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                        ui.add_space(8.0);
+                                    });
                             });
 
                         // Push technical metadata to the bottom of the drawer

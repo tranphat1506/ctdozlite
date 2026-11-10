@@ -11,9 +11,9 @@
 use anyhow::Result;
 use session::Session;
 pub use zalo_rust::{
-    account_manager, api_mcp, audio, call, chat, clock, crypto, data_dir, endpoints, feed, gui, history_sync,
-    logger, login, media, media_resources, message_model, param_cipher, qr, reactions, scheduler,
-    session, socket, store, tui, ui, unread, updater, voip_log,
+    account_manager, api_mcp, audio, call, chat, clock, crypto, data_dir, endpoints, feed, gui,
+    history_sync, logger, login, media, media_resources, message_model, param_cipher, qr,
+    reactions, scheduler, session, socket, store, tui, ui, unread, updater, voip_log,
 };
 
 pub const POLL_SECS: u64 = 4;
@@ -222,11 +222,12 @@ async fn main() -> Result<()> {
         };
 
         let mut initial_threads = chat::load_threads_cache();
-        let db_to_load = if let Some(uin) = s.login.as_ref().map(|l| &l.uin).filter(|u| !u.is_empty()) {
-            store::db_path_for_account(uin)
-        } else {
-            "zalo_history.db".to_string()
-        };
+        let db_to_load =
+            if let Some(uin) = s.login.as_ref().map(|l| &l.uin).filter(|u| !u.is_empty()) {
+                store::db_path_for_account(uin)
+            } else {
+                "zalo_history.db".to_string()
+            };
         store::load_history_into_threads(
             &db_to_load,
             &mut initial_threads,

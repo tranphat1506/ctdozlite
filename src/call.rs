@@ -1092,7 +1092,13 @@ pub async fn poll_control_events(
                 ev_ms > 0 && now_ms.saturating_sub(ev_ms) <= 45_000
             })
             .collect();
-        return Ok((fresh_invites, mute_events, typing_events, seen_events, sync_events));
+        return Ok((
+            fresh_invites,
+            mute_events,
+            typing_events,
+            seen_events,
+            sync_events,
+        ));
     }
     let events = extract_voip_controls(data_node);
     if !events.is_empty() {

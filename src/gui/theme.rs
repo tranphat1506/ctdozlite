@@ -366,12 +366,7 @@ fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
         .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
-fn paint_circular_image(
-    painter: &egui::Painter,
-    center: Pos2,
-    radius: f32,
-    tex: &TextureHandle,
-) {
+fn paint_circular_image(painter: &egui::Painter, center: Pos2, radius: f32, tex: &TextureHandle) {
     let [tw, th] = tex.size();
     let (uv_min, uv_max) = if tw == th || tw == 0 || th == 0 {
         (Pos2::ZERO, Pos2::new(1.0, 1.0))
@@ -516,9 +511,7 @@ pub(super) fn paint_user_avatar(
     // Vẽ avatar nhóm chuẩn đơn với màu sắc và tên viết tắt đẹp mắt, không cắt ghép chữ li ti
     let has_any_photo = slots.iter().any(|(_, u)| !u.is_empty());
     if !has_any_photo {
-        paint_single_circle_avatar(
-            painter, center, radius, name, true, None, textures, loading,
-        );
+        paint_single_circle_avatar(painter, center, radius, name, true, None, textures, loading);
         return;
     }
 
@@ -550,7 +543,11 @@ pub(super) fn paint_user_avatar(
                     sub_r,
                     m_name,
                     false,
-                    if m_url.is_empty() { None } else { Some(m_url.as_str()) },
+                    if m_url.is_empty() {
+                        None
+                    } else {
+                        Some(m_url.as_str())
+                    },
                     textures,
                     loading,
                 );
@@ -571,7 +568,11 @@ pub(super) fn paint_user_avatar(
                     sub_r,
                     m_name,
                     false,
-                    if m_url.is_empty() { None } else { Some(m_url.as_str()) },
+                    if m_url.is_empty() {
+                        None
+                    } else {
+                        Some(m_url.as_str())
+                    },
                     textures,
                     loading,
                 );
@@ -610,7 +611,11 @@ pub(super) fn paint_user_avatar(
                 sub_r,
                 m_name,
                 false,
-                if m_url.is_empty() { None } else { Some(m_url.as_str()) },
+                if m_url.is_empty() {
+                    None
+                } else {
+                    Some(m_url.as_str())
+                },
                 textures,
                 loading,
             );
@@ -625,7 +630,11 @@ pub(super) fn paint_user_avatar(
                     sub_r,
                     m_name,
                     false,
-                    if m_url.is_empty() { None } else { Some(m_url.as_str()) },
+                    if m_url.is_empty() {
+                        None
+                    } else {
+                        Some(m_url.as_str())
+                    },
                     textures,
                     loading,
                 );

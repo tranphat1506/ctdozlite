@@ -28,7 +28,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use wasmtime::{Caller, Engine, Extern, Func, Instance, Linker, Memory, Module, Store, Val};
 
 // ---------------------------------------------------------------------------
@@ -50,10 +50,13 @@ pub fn find_wasm_path() -> Option<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
     #[cfg(target_os = "macos")]
     {
-        roots.push(PathBuf::from("/Applications/Zalo.app/Contents/Resources/app.asar.unpacked"));
+        roots.push(PathBuf::from(
+            "/Applications/Zalo.app/Contents/Resources/app.asar.unpacked",
+        ));
         if let Ok(home) = std::env::var("HOME") {
             roots.push(
-                PathBuf::from(home).join("Applications/Zalo.app/Contents/Resources/app.asar.unpacked"),
+                PathBuf::from(home)
+                    .join("Applications/Zalo.app/Contents/Resources/app.asar.unpacked"),
             );
         }
     }
@@ -138,7 +141,10 @@ enum JsVal {
     Str(String),
     /// Uint8Array: owned bytes plus optional `(ptr, len)` view into WASM
     /// memory (`new with byteoffset/length`, `subarray`).
-    U8 { bytes: Vec<u8>, view: Option<(u32, u32)> },
+    U8 {
+        bytes: Vec<u8>,
+        view: Option<(u32, u32)>,
+    },
     /// Shared dummy for GLOBAL / process / versions / crypto / require etc.
     Dummy(&'static str),
     /// Callable marker for the getrandom shim dispatch.
@@ -172,7 +178,11 @@ impl HostState {
         heap.push(Some(JsVal::Func(FuncKind::GetRandomValues))); // 10
         heap.push(Some(JsVal::Func(FuncKind::RandomFillSync))); // 11
         heap.push(Some(JsVal::Func(FuncKind::Require))); // 12
-        Self { heap, free: Vec::new(), require_crypto_obj: 9 }
+        Self {
+            heap,
+            free: Vec::new(),
+            require_crypto_obj: 9,
+        }
     }
     fn alloc(&mut self, v: JsVal) -> u32 {
         if let Some(i) = self.free.pop() {
@@ -185,7 +195,10 @@ impl HostState {
     }
     fn get(&self, idx: u32) -> &JsVal {
         static UNDEF: JsVal = JsVal::Undefined;
-        self.heap.get(idx as usize).and_then(|o| o.as_ref()).unwrap_or(&UNDEF)
+        self.heap
+            .get(idx as usize)
+            .and_then(|o| o.as_ref())
+            .unwrap_or(&UNDEF)
     }
     fn take(&mut self, idx: u32) -> JsVal {
         if idx < 132 {
@@ -210,7 +223,10 @@ impl HostState {
 // ---------------------------------------------------------------------------
 
 fn mem_of(caller: &mut Caller<'_, HostState>) -> Memory {
-    caller.get_export("memory").and_then(Extern::into_memory).expect("wasm exports memory")
+    caller
+        .get_export("memory")
+        .and_then(Extern::into_memory)
+        .expect("wasm exports memory")
 }
 
 fn read_bytes(caller: &Caller<'_, HostState>, memory: Memory, ptr: u32, len: u32) -> Vec<u8> {
@@ -230,9 +246,10 @@ fn write_bytes(caller: &mut Caller<'_, HostState>, memory: Memory, ptr: u32, byt
 /// Resolve a heap `U8` to concrete bytes (views read back from WASM memory).
 fn u8_bytes(caller: &Caller<'_, HostState>, memory: Memory, idx: u32) -> Vec<u8> {
     match caller.data().get(idx) {
-        JsVal::U8 { bytes, view: Some((ptr, len)) } if bytes.is_empty() => {
-            read_bytes(caller, memory, *ptr, *len)
-        }
+        JsVal::U8 {
+            bytes,
+            view: Some((ptr, len)),
+        } if bytes.is_empty() => read_bytes(caller, memory, *ptr, *len),
         JsVal::U8 { bytes, .. } => bytes.clone(),
         _ => Vec::new(),
     }
@@ -248,7 +265,11 @@ fn fill_random(dest: &mut [u8]) -> anyhow::Result<()> {
 /// which branch the shim takes. The Zalo glue's `require` path needs the
 /// exact prefix `"return require"` to select node; anything else is dead.
 fn classify_new_function(src: &str) -> FuncKind {
-    if src.starts_with("return require") { FuncKind::Require } else { FuncKind::Dead }
+    if src.starts_with("return require") {
+        FuncKind::Require
+    } else {
+        FuncKind::Dead
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -257,9 +278,13 @@ fn classify_new_function(src: &str) -> FuncKind {
 
 fn add_imports(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     // -- heap ---------------------------------------------------------------
-    linker.func_wrap("wbg", "__wbindgen_object_drop_ref", |mut caller: Caller<'_, HostState>, idx: u32| {
-        caller.data_mut().take(idx);
-    })?;
+    linker.func_wrap(
+        "wbg",
+        "__wbindgen_object_drop_ref",
+        |mut caller: Caller<'_, HostState>, idx: u32| {
+            caller.data_mut().take(idx);
+        },
+    )?;
     linker.func_wrap(
         "wbg",
         "__wbindgen_object_clone_ref",
@@ -274,24 +299,45 @@ fn add_imports(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             caller.data_mut().alloc(JsVal::Str(s))
         },
     )?;
-    linker.func_wrap("wbg", "__wbindgen_number_new", |mut caller: Caller<'_, HostState>, v: f64| -> u32 {
-        caller.data_mut().alloc(JsVal::Num(v))
-    })?;
-    linker.func_wrap("wbg", "__wbindgen_memory", |mut caller: Caller<'_, HostState>| -> u32 {
-        let m = mem_of(&mut caller);
-        let view = (0u32, m.data_size(&caller) as u32);
-        caller.data_mut().alloc(JsVal::U8 { bytes: Vec::new(), view: Some(view) })
-    })?;
-    linker.func_wrap("wbg", "__wbindgen_throw", |mut caller: Caller<'_, HostState>, ptr: u32, len: u32| -> Result<(), wasmtime::Error> {
-        let m = caller.get_export("memory").and_then(Extern::into_memory).expect("memory");
-        let s = String::from_utf8_lossy(&read_bytes(&caller, m, ptr, len)).into_owned();
-        Err(wasmtime::Error::msg(format!("wasm throw: {s}")))
-    })?;
+    linker.func_wrap(
+        "wbg",
+        "__wbindgen_number_new",
+        |mut caller: Caller<'_, HostState>, v: f64| -> u32 {
+            caller.data_mut().alloc(JsVal::Num(v))
+        },
+    )?;
+    linker.func_wrap(
+        "wbg",
+        "__wbindgen_memory",
+        |mut caller: Caller<'_, HostState>| -> u32 {
+            let m = mem_of(&mut caller);
+            let view = (0u32, m.data_size(&caller) as u32);
+            caller.data_mut().alloc(JsVal::U8 {
+                bytes: Vec::new(),
+                view: Some(view),
+            })
+        },
+    )?;
+    linker.func_wrap(
+        "wbg",
+        "__wbindgen_throw",
+        |mut caller: Caller<'_, HostState>, ptr: u32, len: u32| -> Result<(), wasmtime::Error> {
+            let m = caller
+                .get_export("memory")
+                .and_then(Extern::into_memory)
+                .expect("memory");
+            let s = String::from_utf8_lossy(&read_bytes(&caller, m, ptr, len)).into_owned();
+            Err(wasmtime::Error::msg(format!("wasm throw: {s}")))
+        },
+    )?;
     linker.func_wrap(
         "wbg",
         "__wbindgen_is_object",
         |caller: Caller<'_, HostState>, idx: u32| -> i32 {
-            matches!(caller.data().get(idx), JsVal::Dummy(_) | JsVal::U8 { .. } | JsVal::Func(_) | JsVal::Err(_)) as i32
+            matches!(
+                caller.data().get(idx),
+                JsVal::Dummy(_) | JsVal::U8 { .. } | JsVal::Func(_) | JsVal::Err(_)
+            ) as i32
         },
     )?;
     linker.func_wrap(
@@ -317,15 +363,27 @@ fn add_imports(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     )?;
 
     // -- Array / Object / Error ----------------------------------------------
-    linker.func_wrap("wbg", "__wbg_new_78feb108b6472713", |mut caller: Caller<'_, HostState>| -> u32 {
-        caller.data_mut().alloc(JsVal::Dummy("array"))
-    })?;
-    linker.func_wrap("wbg", "__wbg_new_405e22f390576ce2", |mut caller: Caller<'_, HostState>| -> u32 {
-        caller.data_mut().alloc(JsVal::Dummy("object"))
-    })?;
-    linker.func_wrap("wbg", "__wbg_new_8a6f238a6ece86ea", |mut caller: Caller<'_, HostState>| -> u32 {
-        caller.data_mut().alloc(JsVal::Err(String::new()))
-    })?;
+    linker.func_wrap(
+        "wbg",
+        "__wbg_new_78feb108b6472713",
+        |mut caller: Caller<'_, HostState>| -> u32 {
+            caller.data_mut().alloc(JsVal::Dummy("array"))
+        },
+    )?;
+    linker.func_wrap(
+        "wbg",
+        "__wbg_new_405e22f390576ce2",
+        |mut caller: Caller<'_, HostState>| -> u32 {
+            caller.data_mut().alloc(JsVal::Dummy("object"))
+        },
+    )?;
+    linker.func_wrap(
+        "wbg",
+        "__wbg_new_8a6f238a6ece86ea",
+        |mut caller: Caller<'_, HostState>| -> u32 {
+            caller.data_mut().alloc(JsVal::Err(String::new()))
+        },
+    )?;
     linker.func_wrap(
         "wbg",
         "__wbg_push_737cfc8c1432c2c6",
@@ -337,7 +395,12 @@ fn add_imports(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         |mut caller: Caller<'_, HostState>, obj: u32, _k: u32, v: u32| {
             // `a(e)[p(t)] = p(s)` — only used on Error objects; record message.
             if let JsVal::Str(s) = caller.data().get(v).clone() {
-                if let Some(JsVal::Err(e)) = caller.data_mut().heap.get_mut(obj as usize).and_then(|o| o.as_mut()) {
+                if let Some(JsVal::Err(e)) = caller
+                    .data_mut()
+                    .heap
+                    .get_mut(obj as usize)
+                    .and_then(|o| o.as_mut())
+                {
                     *e = s;
                 }
             }
@@ -350,7 +413,11 @@ fn add_imports(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             // `a(e).set(a(t), off)` — views write through to WASM memory.
             let m = mem_of(&mut caller);
             let src_bytes = u8_bytes(&caller, m, src);
-            if let JsVal::U8 { view: Some((ptr, _)), .. } = caller.data().get(arr).clone() {
+            if let JsVal::U8 {
+                view: Some((ptr, _)),
+                ..
+            } = caller.data().get(arr).clone()
+            {
                 write_bytes(&mut caller, m, ptr + off, &src_bytes);
             }
         },
@@ -380,7 +447,10 @@ fn add_imports(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         "wbg",
         "__wbg_newwithlength_a381634e90c276d4",
         |mut caller: Caller<'_, HostState>, len: u32| -> u32 {
-            caller.data_mut().alloc(JsVal::U8 { bytes: vec![0; len as usize], view: None })
+            caller.data_mut().alloc(JsVal::U8 {
+                bytes: vec![0; len as usize],
+                view: None,
+            })
         },
     )?;
     linker.func_wrap(
@@ -389,7 +459,10 @@ fn add_imports(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         |mut caller: Caller<'_, HostState>, src: u32| -> u32 {
             let m = mem_of(&mut caller);
             let b = u8_bytes(&caller, m, src);
-            caller.data_mut().alloc(JsVal::U8 { bytes: b, view: None })
+            caller.data_mut().alloc(JsVal::U8 {
+                bytes: b,
+                view: None,
+            })
         },
     )?;
     linker.func_wrap(
@@ -397,7 +470,10 @@ fn add_imports(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         "__wbg_newwithbyteoffsetandlength_d97e637ebe145a9a",
         |mut caller: Caller<'_, HostState>, _buf: u32, off: u32, len: u32| -> u32 {
             // `new Uint8Array(memory.buffer, off, len)`: zero-copy view.
-            caller.data_mut().alloc(JsVal::U8 { bytes: Vec::new(), view: Some((off, len)) })
+            caller.data_mut().alloc(JsVal::U8 {
+                bytes: Vec::new(),
+                view: Some((off, len)),
+            })
         },
     )?;
     linker.func_wrap(
@@ -406,15 +482,27 @@ fn add_imports(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         |mut caller: Caller<'_, HostState>, arr: u32, s: u32, e: u32| -> u32 {
             let owned = caller.data().get(arr).clone();
             match owned {
-                JsVal::U8 { bytes, view: Some((ptr, _)) } => {
+                JsVal::U8 {
+                    bytes,
+                    view: Some((ptr, _)),
+                } => {
                     let _ = bytes;
-                    caller.data_mut().alloc(JsVal::U8 { bytes: Vec::new(), view: Some((ptr + s, e - s)) })
+                    caller.data_mut().alloc(JsVal::U8 {
+                        bytes: Vec::new(),
+                        view: Some((ptr + s, e - s)),
+                    })
                 }
                 JsVal::U8 { bytes, view: None } => {
                     let sub = bytes.get(s as usize..e as usize).unwrap_or(&[]).to_vec();
-                    caller.data_mut().alloc(JsVal::U8 { bytes: sub, view: None })
+                    caller.data_mut().alloc(JsVal::U8 {
+                        bytes: sub,
+                        view: None,
+                    })
                 }
-                _ => caller.data_mut().alloc(JsVal::U8 { bytes: Vec::new(), view: None }),
+                _ => caller.data_mut().alloc(JsVal::U8 {
+                    bytes: Vec::new(),
+                    view: None,
+                }),
             }
         },
     )?;
@@ -430,40 +518,70 @@ fn add_imports(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     // Glue probes `globalThis.crypto`, `process.versions.node`,
     // `require("crypto")`; every path ends at OS randomness, so all handles
     // resolve to shared dummies and both fill entry points write real entropy.
-    linker.func_wrap("wbg", "__wbg_static_accessor_GLOBAL_88a902d13a557d07", |mut caller: Caller<'_, HostState>| -> u32 {
-        caller.data_mut().alloc(JsVal::Dummy("global"))
-    })?;
+    linker.func_wrap(
+        "wbg",
+        "__wbg_static_accessor_GLOBAL_88a902d13a557d07",
+        |mut caller: Caller<'_, HostState>| -> u32 {
+            caller.data_mut().alloc(JsVal::Dummy("global"))
+        },
+    )?;
     linker.func_wrap(
         "wbg",
         "__wbg_static_accessor_GLOBAL_THIS_56578be7e9f832b0",
-        |mut caller: Caller<'_, HostState>| -> u32 { caller.data_mut().alloc(JsVal::Dummy("global")) },
+        |mut caller: Caller<'_, HostState>| -> u32 {
+            caller.data_mut().alloc(JsVal::Dummy("global"))
+        },
     )?;
     linker.func_wrap(
         "wbg",
         "__wbg_static_accessor_WINDOW_5de37043a91a9c40",
-        |mut caller: Caller<'_, HostState>| -> u32 { caller.data_mut().alloc(JsVal::Dummy("global")) },
+        |mut caller: Caller<'_, HostState>| -> u32 {
+            caller.data_mut().alloc(JsVal::Dummy("global"))
+        },
     )?;
     linker.func_wrap(
         "wbg",
         "__wbg_static_accessor_SELF_37c5d418e4bf5819",
-        |mut caller: Caller<'_, HostState>| -> u32 { caller.data_mut().alloc(JsVal::Dummy("global")) },
+        |mut caller: Caller<'_, HostState>| -> u32 {
+            caller.data_mut().alloc(JsVal::Dummy("global"))
+        },
     )?;
-    linker.func_wrap("wbg", "__wbg_crypto_ed58b8e10a292839", |mut caller: Caller<'_, HostState>, _o: u32| -> u32 {
-        caller.data_mut().alloc(JsVal::Dummy("crypto"))
-    })?;
-    linker.func_wrap("wbg", "__wbg_msCrypto_0a36e2ec3a343d26", |_caller: Caller<'_, HostState>, _o: u32| -> u32 {
-        // `msCrypto` (old IE): absent → undefined slot 0.
-        0
-    })?;
-    linker.func_wrap("wbg", "__wbg_process_5c1d670bc53614b8", |mut caller: Caller<'_, HostState>, _o: u32| -> u32 {
-        caller.data_mut().alloc(JsVal::Dummy("process"))
-    })?;
-    linker.func_wrap("wbg", "__wbg_versions_c71aa1626a93e0a1", |mut caller: Caller<'_, HostState>, _o: u32| -> u32 {
-        caller.data_mut().alloc(JsVal::Dummy("versions"))
-    })?;
-    linker.func_wrap("wbg", "__wbg_node_02999533c4ea02e3", |mut caller: Caller<'_, HostState>, _o: u32| -> u32 {
-        caller.data_mut().alloc(JsVal::Dummy("node"))
-    })?;
+    linker.func_wrap(
+        "wbg",
+        "__wbg_crypto_ed58b8e10a292839",
+        |mut caller: Caller<'_, HostState>, _o: u32| -> u32 {
+            caller.data_mut().alloc(JsVal::Dummy("crypto"))
+        },
+    )?;
+    linker.func_wrap(
+        "wbg",
+        "__wbg_msCrypto_0a36e2ec3a343d26",
+        |_caller: Caller<'_, HostState>, _o: u32| -> u32 {
+            // `msCrypto` (old IE): absent → undefined slot 0.
+            0
+        },
+    )?;
+    linker.func_wrap(
+        "wbg",
+        "__wbg_process_5c1d670bc53614b8",
+        |mut caller: Caller<'_, HostState>, _o: u32| -> u32 {
+            caller.data_mut().alloc(JsVal::Dummy("process"))
+        },
+    )?;
+    linker.func_wrap(
+        "wbg",
+        "__wbg_versions_c71aa1626a93e0a1",
+        |mut caller: Caller<'_, HostState>, _o: u32| -> u32 {
+            caller.data_mut().alloc(JsVal::Dummy("versions"))
+        },
+    )?;
+    linker.func_wrap(
+        "wbg",
+        "__wbg_node_02999533c4ea02e3",
+        |mut caller: Caller<'_, HostState>, _o: u32| -> u32 {
+            caller.data_mut().alloc(JsVal::Dummy("node"))
+        },
+    )?;
     linker.func_wrap(
         "wbg",
         "__wbg_require_79b1e9274cde3c87",
@@ -497,14 +615,22 @@ fn add_imports(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     linker.func_wrap(
         "wbg",
         "__wbg_call_7cccdd69e0791ae2",
-        |mut caller: Caller<'_, HostState>, f: u32, this: u32, arg: u32| -> Result<u32, wasmtime::Error> {
+        |mut caller: Caller<'_, HostState>,
+         f: u32,
+         this: u32,
+         arg: u32|
+         -> Result<u32, wasmtime::Error> {
             call1(&mut caller, f, this, arg).map_err(|e| wasmtime::Error::msg(e.to_string()))
         },
     )?;
     linker.func_wrap(
         "wbg",
         "__wbg_apply_36be6a55257c99bf",
-        |mut caller: Caller<'_, HostState>, f: u32, this: u32, args: u32| -> Result<u32, wasmtime::Error> {
+        |mut caller: Caller<'_, HostState>,
+         f: u32,
+         this: u32,
+         args: u32|
+         -> Result<u32, wasmtime::Error> {
             // `apply` is only used for `getRandomValues(view)` — one array arg.
             call1(&mut caller, f, this, args).map_err(|e| wasmtime::Error::msg(e.to_string()))
         },
@@ -512,9 +638,16 @@ fn add_imports(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     linker.func_wrap(
         "wbg",
         "__wbg_getRandomValues_bcb4912f16000dc4",
-        |mut caller: Caller<'_, HostState>, _crypto: u32, arr: u32| -> Result<(), wasmtime::Error> {
+        |mut caller: Caller<'_, HostState>,
+         _crypto: u32,
+         arr: u32|
+         -> Result<(), wasmtime::Error> {
             let m = mem_of(&mut caller);
-            if let JsVal::U8 { view: Some((ptr, len)), .. } = caller.data().get(arr).clone() {
+            if let JsVal::U8 {
+                view: Some((ptr, len)),
+                ..
+            } = caller.data().get(arr).clone()
+            {
                 let mut buf = vec![0u8; len as usize];
                 fill_random(&mut buf).map_err(|e| wasmtime::Error::msg(e.to_string()))?;
                 write_bytes(&mut caller, m, ptr, &buf);
@@ -525,7 +658,10 @@ fn add_imports(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     linker.func_wrap(
         "wbg",
         "__wbg_randomFillSync_ab2cfe79ebbf2740",
-        |mut caller: Caller<'_, HostState>, _crypto: u32, arr: u32| -> Result<(), wasmtime::Error> {
+        |mut caller: Caller<'_, HostState>,
+         _crypto: u32,
+         arr: u32|
+         -> Result<(), wasmtime::Error> {
             fill_u8(&mut caller, arr).map_err(|e| wasmtime::Error::msg(e.to_string()))
         },
     )?;
@@ -563,7 +699,10 @@ fn fill_u8(caller: &mut Caller<'_, HostState>, idx: u32) -> anyhow::Result<()> {
     let m = mem_of(caller);
     let owned = caller.data().get(idx).clone();
     match owned {
-        JsVal::U8 { view: Some((ptr, len)), .. } => {
+        JsVal::U8 {
+            view: Some((ptr, len)),
+            ..
+        } => {
             let mut buf = vec![0u8; len as usize];
             fill_random(&mut buf).map_err(|e| wasmtime::Error::msg(e.to_string()))?;
             write_bytes(caller, m, ptr, &buf);
@@ -625,16 +764,38 @@ impl ZprotoHost {
             .get_memory(&mut store, "memory")
             .ok_or_else(|| anyhow!("wasm has no memory export"))?;
         let need = |n: &str, store: &mut Store<HostState>| -> Result<Func> {
-            instance.get_func(&mut *store, n).ok_or_else(|| anyhow!("wasm missing export {n}"))
+            instance
+                .get_func(&mut *store, n)
+                .ok_or_else(|| anyhow!("wasm missing export {n}"))
         };
         let malloc = need("__wbindgen_export_2", &mut store)?;
         let free = need("__wbindgen_export_1", &mut store)?;
-        Ok(Self { inner: Mutex::new(Inner { store, instance, memory, malloc, free }) })
+        Ok(Self {
+            inner: Mutex::new(Inner {
+                store,
+                instance,
+                memory,
+                malloc,
+                free,
+            }),
+        })
     }
 
-    fn with<T>(&self, f: impl FnOnce(&mut Store<HostState>, &Instance, Memory, &Func, &Func) -> Result<T>) -> Result<T> {
-        let mut inner = self.inner.lock().map_err(|_| anyhow!("zproto host lock poisoned"))?;
-        let Inner { store, instance, memory, malloc, free } = &mut *inner;
+    fn with<T>(
+        &self,
+        f: impl FnOnce(&mut Store<HostState>, &Instance, Memory, &Func, &Func) -> Result<T>,
+    ) -> Result<T> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow!("zproto host lock poisoned"))?;
+        let Inner {
+            store,
+            instance,
+            memory,
+            malloc,
+            free,
+        } = &mut *inner;
         f(store, instance, *memory, malloc, free)
     }
 
@@ -646,7 +807,11 @@ impl ZprotoHost {
         bytes: &[u8],
     ) -> Result<(u32, u32)> {
         let mut out = [Val::I32(0)];
-        malloc.call(&mut *store, &[Val::I32(bytes.len() as i32), Val::I32(1)], &mut out)?;
+        malloc.call(
+            &mut *store,
+            &[Val::I32(bytes.len() as i32), Val::I32(1)],
+            &mut out,
+        )?;
         let ptr = match out[0] {
             Val::I32(p) => p as u32,
             _ => anyhow::bail!("malloc returned non-i32"),
@@ -678,8 +843,17 @@ impl ZprotoHost {
         Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     }
 
-    fn free_mem(store: &mut Store<HostState>, free: &Func, ptr: u32, len: u32) -> anyhow::Result<()> {
-        free.call(store, &[Val::I32(ptr as i32), Val::I32(len as i32), Val::I32(1)], &mut [])?;
+    fn free_mem(
+        store: &mut Store<HostState>,
+        free: &Func,
+        ptr: u32,
+        len: u32,
+    ) -> anyhow::Result<()> {
+        free.call(
+            store,
+            &[Val::I32(ptr as i32), Val::I32(len as i32), Val::I32(1)],
+            &mut [],
+        )?;
         Ok(())
     }
 
@@ -687,9 +861,10 @@ impl ZprotoHost {
     fn take_bytes(store: &mut Store<HostState>, memory: Memory, idx: u32) -> Vec<u8> {
         let owned: JsVal = store.data_mut().take(idx);
         match owned {
-            JsVal::U8 { bytes, view: Some((ptr, len)) } if bytes.is_empty() => {
-                Self::read_mem(store, memory, ptr, len)
-            }
+            JsVal::U8 {
+                bytes,
+                view: Some((ptr, len)),
+            } if bytes.is_empty() => Self::read_mem(store, memory, ptr, len),
             JsVal::U8 { bytes, .. } => bytes,
             JsVal::Str(s) => s.into_bytes(),
             _ => Vec::new(),
@@ -698,7 +873,9 @@ impl ZprotoHost {
 
     fn call_raw(&self, name: &str, args: &[Val]) -> anyhow::Result<()> {
         self.with(|store, instance, _, _, _| {
-            let f = instance.get_func(&mut *store, name).ok_or_else(|| anyhow!("wasm missing export {name}"))?;
+            let f = instance
+                .get_func(&mut *store, name)
+                .ok_or_else(|| anyhow!("wasm missing export {name}"))?;
             f.call(&mut *store, args, &mut [])?;
             Ok(())
         })
@@ -708,7 +885,9 @@ impl ZprotoHost {
     /// Equivalent to the glue's `__wbindgen_add_to_stack_pointer(-16)` retptr
     /// slot for reading `[ptr, len]` / `[ptr, len, err]` returns.
     fn with_retptr<T>(&self, f: impl FnOnce(&Self, u32) -> Result<T>) -> Result<T> {
-        let rp = self.with(|store, _, memory, malloc, _| Self::pass_bytes(store, memory, malloc, &[0u8; 16]))?;
+        let rp = self.with(|store, _, memory, malloc, _| {
+            Self::pass_bytes(store, memory, malloc, &[0u8; 16])
+        })?;
         let rp = rp.0;
         let out = f(self, rp);
         let _ = self.with(|store, _, _, _, free| Self::free_mem(store, free, rp, 16));
@@ -716,15 +895,24 @@ impl ZprotoHost {
     }
 
     fn free_keypair(&self, ptr: u32) -> anyhow::Result<()> {
-        self.call_raw("__wbg_zprotoed25519keypair_free", &[Val::I32(ptr as i32), Val::I32(0)])
+        self.call_raw(
+            "__wbg_zprotoed25519keypair_free",
+            &[Val::I32(ptr as i32), Val::I32(0)],
+        )
     }
 
     fn free_meta(&self, ptr: u32) -> anyhow::Result<()> {
-        self.call_raw("__wbg_zprotosyncmetadatadecrypted_free", &[Val::I32(ptr as i32), Val::I32(0)])
+        self.call_raw(
+            "__wbg_zprotosyncmetadatadecrypted_free",
+            &[Val::I32(ptr as i32), Val::I32(0)],
+        )
     }
 
     fn free_msg(&self, ptr: u32) -> anyhow::Result<()> {
-        self.call_raw("__wbg_zprotosyncmessagedecrypted_free", &[Val::I32(ptr as i32), Val::I32(0)])
+        self.call_raw(
+            "__wbg_zprotosyncmessagedecrypted_free",
+            &[Val::I32(ptr as i32), Val::I32(0)],
+        )
     }
 
     /// `e()` → `(public_key[33], private_key[32])`. Mirrors glue `k()`.
@@ -746,7 +934,9 @@ impl ZprotoHost {
         // Getters return heap indices of Uint8Array views.
         let get_u8 = |this: &Self, name: &str| -> Result<Vec<u8>> {
             let idx: u32 = this.with(|store, instance, _, _, _| {
-                let f = instance.get_func(&mut *store, name).ok_or_else(|| anyhow!("wasm missing export {name}"))?;
+                let f = instance
+                    .get_func(&mut *store, name)
+                    .ok_or_else(|| anyhow!("wasm missing export {name}"))?;
                 let mut out = [Val::I32(0)];
                 f.call(&mut *store, &[Val::I32(ptr as i32)], &mut out)?;
                 match out[0] {
@@ -772,7 +962,13 @@ impl ZprotoHost {
             })?;
             h.call_raw(
                 "zprotoEd25519CalculateAgreement",
-                &[Val::I32(rp as i32), Val::I32(aptr as i32), Val::I32(alen as i32), Val::I32(bptr as i32), Val::I32(blen as i32)],
+                &[
+                    Val::I32(rp as i32),
+                    Val::I32(aptr as i32),
+                    Val::I32(alen as i32),
+                    Val::I32(bptr as i32),
+                    Val::I32(blen as i32),
+                ],
             )?;
             h.with(|store, _, memory, _, free| {
                 let ptr = Self::read_u32(store, memory, rp)?;
@@ -816,13 +1012,19 @@ impl ZprotoHost {
                 };
                 Ok(vec![
                     Val::I32(rp as i32),
-                    Val::I32(c as i32), Val::I32(cl as i32),
-                    Val::I32(a as i32), Val::I32(al as i32),
-                    Val::I32(b as i32), Val::I32(bl as i32),
-                    Val::I32(d as i32), Val::I32(dl as i32),
-                    Val::I32(e), Val::I32(el),
+                    Val::I32(c as i32),
+                    Val::I32(cl as i32),
+                    Val::I32(a as i32),
+                    Val::I32(al as i32),
+                    Val::I32(b as i32),
+                    Val::I32(bl as i32),
+                    Val::I32(d as i32),
+                    Val::I32(dl as i32),
+                    Val::I32(e),
+                    Val::I32(el),
                     // Optional 6th string arg: null → (0, 0).
-                    Val::I32(0), Val::I32(0),
+                    Val::I32(0),
+                    Val::I32(0),
                 ])
             })?;
             h.call_raw("zprotoSync2DecryptMetadata", &args)?;
@@ -840,7 +1042,9 @@ impl ZprotoHost {
         })?;
         let get_str = |name: &str| -> Result<String> {
             let idx: u32 = self.with(|store, instance, _, _, _| {
-                let f = instance.get_func(&mut *store, name).ok_or_else(|| anyhow!("wasm missing export {name}"))?;
+                let f = instance
+                    .get_func(&mut *store, name)
+                    .ok_or_else(|| anyhow!("wasm missing export {name}"))?;
                 let mut out = [Val::I32(0)];
                 f.call(&mut *store, &[Val::I32(obj as i32)], &mut out)?;
                 match out[0] {
@@ -859,7 +1063,9 @@ impl ZprotoHost {
         };
         let get_bytes = |name: &str| -> Result<Vec<u8>> {
             let idx: u32 = self.with(|store, instance, _, _, _| {
-                let f = instance.get_func(&mut *store, name).ok_or_else(|| anyhow!("wasm missing export {name}"))?;
+                let f = instance
+                    .get_func(&mut *store, name)
+                    .ok_or_else(|| anyhow!("wasm missing export {name}"))?;
                 let mut out = [Val::I32(0)];
                 f.call(&mut *store, &[Val::I32(obj as i32)], &mut out)?;
                 match out[0] {
@@ -887,8 +1093,10 @@ impl ZprotoHost {
                 let (s, sl) = Self::pass_bytes(store, memory, malloc, session_record)?;
                 Ok(vec![
                     Val::I32(rp as i32),
-                    Val::I32(c as i32), Val::I32(cl as i32),
-                    Val::I32(s as i32), Val::I32(sl as i32),
+                    Val::I32(c as i32),
+                    Val::I32(cl as i32),
+                    Val::I32(s as i32),
+                    Val::I32(sl as i32),
                 ])
             })?;
             h.call_raw("zprotoSync2DecryptMessage", &args)?;
@@ -934,7 +1142,10 @@ impl ZprotoHost {
             Ok(Self::take_bytes(store, memory, idx))
         })?;
         self.free_msg(obj)?;
-        Ok(DecryptedMsg { session_id, plaintext })
+        Ok(DecryptedMsg {
+            session_id,
+            plaintext,
+        })
     }
 }
 
@@ -984,7 +1195,9 @@ mod tests {
     fn try_load() -> Option<ZprotoHost> {
         match find_wasm_path() {
             None => {
-                eprintln!("SKIP: no libzproto WASM found (install Zalo PC or set CTDOZLITE_ZPROTO_WASM)");
+                eprintln!(
+                    "SKIP: no libzproto WASM found (install Zalo PC or set CTDOZLITE_ZPROTO_WASM)"
+                );
                 None
             }
             Some(p) => match ZprotoHost::load_from(&p) {
@@ -1029,7 +1242,13 @@ mod tests {
 
     #[test]
     fn split_frames_roundtrip() {
-        let blob = [3u32.to_le_bytes().as_slice(), b"abc", 2u32.to_le_bytes().as_slice(), b"de"].concat();
+        let blob = [
+            3u32.to_le_bytes().as_slice(),
+            b"abc",
+            2u32.to_le_bytes().as_slice(),
+            b"de",
+        ]
+        .concat();
         let chunks = split_frames(&blob).unwrap();
         assert_eq!(chunks, vec![b"abc".to_vec(), b"de".to_vec()]);
         assert!(split_frames(b"ab").is_err());

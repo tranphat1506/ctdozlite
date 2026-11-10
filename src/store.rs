@@ -31,6 +31,249 @@ pub struct StoredThread {
     pub last_read_msg_id: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MediaKind {
+    #[default]
+    Photos,
+    Files,
+    Links,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaPhotoItem {
+    pub msg_id: String,
+    pub thumb_key: String,
+    pub thumb_url: String,
+    pub full_url: String,
+    pub title: String,
+    pub time_str: String,
+    pub ts: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaFileItem {
+    pub msg_id: String,
+    pub file_name: String,
+    pub file_ext: String,
+    pub time_str: String,
+    pub file_url: String,
+    pub ts: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaLinkItem {
+    pub msg_id: String,
+    pub title: String,
+    pub url: String,
+    pub domain: String,
+    pub time_str: String,
+    pub ts: i64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MediaPageResult {
+    pub thread_id: String,
+    pub kind: MediaKind,
+    pub offset: usize,
+    pub photos: Vec<MediaPhotoItem>,
+    pub files: Vec<MediaFileItem>,
+    pub links: Vec<MediaLinkItem>,
+    pub total_photos: usize,
+    pub total_files: usize,
+    pub total_links: usize,
+    pub has_more_photos: bool,
+    pub has_more_files: bool,
+    pub has_more_links: bool,
+}
+
+/// Extract all `http://` or `https://` URLs from a message text or ASCII-clean payload.
+pub fn extract_http_urls(text: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    let mut search_start = 0;
+    while search_start < text.len() {
+        let rest = &text[search_start..];
+        let pos = match (rest.find("https://"), rest.find("http://")) {
+            (Some(a), Some(b)) => a.min(b),
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => break,
+        };
+        let abs_start = search_start + pos;
+        let url_slice = &text[abs_start..];
+        let end = url_slice
+            .find(|c: char| {
+                c.is_whitespace()
+                    || matches!(
+                        c,
+                        '"' | '\'' | '<' | '>' | '`' | '{' | '}' | '[' | ']' | '\\' | '\0'
+                    )
+            })
+            .unwrap_or(url_slice.len());
+        let mut candidate = url_slice[..end]
+            .trim_end_matches(['.', ',', ';', ')', '!', '?'])
+            .to_string();
+        // Keep balanced parentheses if the URL legitimately ends with ')'
+        if candidate.contains('(') && url_slice[..end].ends_with(')') {
+            candidate.push(')');
+        }
+        if candidate.len() > 10 && !urls.contains(&candidate) {
+            urls.push(candidate);
+        }
+        search_start = abs_start + end.max(1);
+    }
+    urls
+}
+
+/// Extract hostname (without `www.`) from an HTTP(S) URL.
+pub fn extract_domain_from_url(url: &str) -> String {
+    let without_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    let host = without_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("");
+    host.strip_prefix("www.").unwrap_or(host).to_string()
+}
+
+/// Extract filename and uppercase extension badge from a URL or title string.
+pub fn extract_filename_and_ext(url_or_name: &str) -> (String, String) {
+    let no_query = url_or_name.split(['?', '#']).next().unwrap_or(url_or_name);
+    let segment = no_query.rsplit('/').next().unwrap_or(no_query).trim();
+    let decoded = if segment.contains('%') {
+        segment.replace("%20", " ")
+    } else {
+        segment.to_string()
+    };
+    let ext = decoded
+        .rsplit_once('.')
+        .map(|(_, e)| e.trim().to_ascii_uppercase())
+        .filter(|e| !e.is_empty() && e.len() <= 5 && e.chars().all(|c| c.is_ascii_alphanumeric()))
+        .unwrap_or_else(|| "FILE".to_string());
+    let name = if decoded.is_empty() {
+        "Tệp đính kèm".to_string()
+    } else {
+        decoded
+    };
+    (name, ext)
+}
+
+/// Classify a URL + message context into Photos, Files, or Links.
+pub fn classify_url_kind(url: &str, text_hint: &str, msg_type: &str) -> MediaKind {
+    let trimmed = text_hint.trim_start();
+    if msg_type == "chat.photo" || trimmed.starts_with("[Hình ảnh]") {
+        return MediaKind::Photos;
+    }
+    if msg_type == "chat.file" || msg_type == "chat.video" || trimmed.starts_with("[Tập tin]") {
+        return MediaKind::Files;
+    }
+
+    let path_lower = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .to_ascii_lowercase();
+    let domain = extract_domain_from_url(url).to_ascii_lowercase();
+
+    const PHOTO_EXTS: &[&str] = &[
+        ".jpg", ".jpeg", ".png", ".webp", ".gif", ".jxl", ".bmp", ".heic",
+    ];
+    const FILE_EXTS: &[&str] = &[
+        ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".zip", ".rar", ".7z", ".tar",
+        ".gz", ".amr", ".mp3", ".m4a", ".wav", ".ogg", ".mp4", ".mov", ".mkv", ".apk", ".txt",
+        ".csv", ".kbql", ".json", ".xml", ".sql",
+    ];
+
+    if FILE_EXTS.iter().any(|ext| path_lower.ends_with(ext))
+        || domain.contains("-zfcloud.zdn.vn")
+        || domain.contains("-voice-talk.zdn.vn")
+        || domain.contains("dlmd.me")
+    {
+        return MediaKind::Files;
+    }
+
+    if PHOTO_EXTS.iter().any(|ext| path_lower.ends_with(ext))
+        || domain.contains("-zpc.zdn.vn")
+        || domain.contains("-zpg-r.zdn.vn")
+        || domain.contains("-zpcloud.zdn.vn")
+        || domain.contains("photo-stal")
+        || domain.contains("zalo-gif.zadn.vn")
+    {
+        return MediaKind::Photos;
+    }
+
+    MediaKind::Links
+}
+
+/// Derive `(msg_type, raw_json)` metadata from plain message text when `raw_json` is absent.
+pub fn build_media_meta_from_text(text: &str, current_msg_type: &str) -> Option<(String, String)> {
+    let urls = extract_http_urls(text);
+    let url = urls.into_iter().next()?;
+    let kind = classify_url_kind(&url, text, current_msg_type);
+
+    match kind {
+        MediaKind::Photos => {
+            let safe_url = jxl_to_jpg_url(&url);
+            let meta = serde_json::json!({
+                "link_src": "Hình ảnh Zalo",
+                "link_url": safe_url,
+                "link_thumb": safe_url,
+            });
+            Some(("chat.photo".to_string(), meta.to_string()))
+        }
+        MediaKind::Files => {
+            let clean_title = text
+                .trim()
+                .strip_prefix("[Tập tin]")
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && !s.starts_with("http"))
+                .map(str::to_string)
+                .unwrap_or_else(|| extract_filename_and_ext(&url).0);
+            let meta = serde_json::json!({
+                "link_src": "Tập tin Zalo",
+                "link_title": clean_title,
+                "link_url": url,
+            });
+            Some(("chat.file".to_string(), meta.to_string()))
+        }
+        MediaKind::Links => {
+            let domain = extract_domain_from_url(&url);
+            let clean_title = text
+                .trim()
+                .strip_prefix("[Link]")
+                .unwrap_or(text.trim())
+                .trim();
+            let title = if clean_title.is_empty() || clean_title == url {
+                if domain.is_empty() {
+                    url.clone()
+                } else {
+                    domain
+                }
+            } else {
+                let first_line = clean_title.lines().next().unwrap_or(clean_title).trim();
+                if first_line.starts_with("http") {
+                    if domain.is_empty() {
+                        url.clone()
+                    } else {
+                        domain
+                    }
+                } else {
+                    first_line.chars().take(80).collect()
+                }
+            };
+            let meta = serde_json::json!({
+                "link_url": url,
+                "link_title": title,
+            });
+            Some(("chat.link".to_string(), meta.to_string()))
+        }
+    }
+}
+
 pub struct MessageStore {
     pub conn: Connection,
 }
@@ -70,7 +313,7 @@ impl MessageStore {
 
     /// Open SQLite database at `path` and initialize table schemas and indices if absent.
     pub fn open(path: &str) -> Result<Self> {
-        let conn = if path == ":memory:" {
+        let mut conn = if path == ":memory:" {
             Connection::open_in_memory()?
         } else {
             Connection::open(path)?
@@ -151,6 +394,48 @@ impl MessageStore {
                  PRAGMA user_version = 2;
                  COMMIT;";
             let _ = conn.execute_batch(fts_setup);
+        }
+
+        // Migration 3: index `(thread_id, msg_type, ts DESC)` for fast media drawer queries
+        // and backfill `raw_json` / `msg_type` for imported messages that store direct URLs in `text`.
+        if conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? < 3 {
+            let mut updates: Vec<(String, String, String)> = Vec::new();
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT msg_id, text, msg_type FROM messages
+                 WHERE (raw_json = '' OR raw_json IS NULL)
+                   AND (text LIKE '%http://%' OR text LIKE '%https://%')",
+            ) {
+                if let Ok(rows) = stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1).unwrap_or_default(),
+                        row.get::<_, String>(2).unwrap_or_default(),
+                    ))
+                }) {
+                    for (msg_id, text, msg_type) in rows.flatten() {
+                        if let Some((new_type, new_json)) =
+                            build_media_meta_from_text(&text, &msg_type)
+                        {
+                            updates.push((new_type, new_json, msg_id));
+                        }
+                    }
+                }
+            }
+            if let Ok(tx) = conn.transaction() {
+                let _ = tx.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_messages_thread_type_ts ON messages(thread_id, msg_type, ts DESC)",
+                    [],
+                );
+                if let Ok(mut upd) =
+                    tx.prepare("UPDATE messages SET msg_type = ?1, raw_json = ?2 WHERE msg_id = ?3")
+                {
+                    for (new_type, new_json, msg_id) in updates {
+                        let _ = upd.execute(params![new_type, new_json, msg_id]);
+                    }
+                }
+                let _ = tx.execute("PRAGMA user_version = 3", []);
+                let _ = tx.commit();
+            }
         }
 
         Ok(Self { conn })
@@ -384,7 +669,12 @@ impl MessageStore {
     }
 
     /// Retrieve older `limit` messages for a thread strictly before `before_ts`, ordered oldest-first.
-    pub fn messages_before(&self, thread_id: &str, before_ts: i64, limit: usize) -> Result<Vec<StoredMessage>> {
+    pub fn messages_before(
+        &self,
+        thread_id: &str,
+        before_ts: i64,
+        limit: usize,
+    ) -> Result<Vec<StoredMessage>> {
         let mut stmt = self.conn.prepare(
             "SELECT msg_id, thread_id, sender_id, sender_name, text, msg_type, ts, is_outgoing, raw_json
              FROM (
@@ -418,31 +708,36 @@ impl MessageStore {
         Ok(list)
     }
 
-    /// Retrieve media items (photos, files, links) directly from SQLite for a thread.
-    pub fn conversation_media_items(
+    /// Retrieve a paginated slice of media items (photos, files, links) directly from SQLite
+    /// for a conversation, along with exact totals per media category.
+    ///
+    /// When `offset == 0`, the first `limit` items of all three categories are populated so
+    /// switching tabs renders immediately without a redundant round-trip. Subsequent pages
+    /// (`offset > 0`) only populate the requested `kind`.
+    pub fn conversation_media_page(
         &self,
         thread_id: &str,
-    ) -> Result<(
-        Vec<(String, String, String, String)>, // (thumb_key, thumb_url, full_url, title)
-        Vec<(String, String, String)>,         // (file_name, time, file_url)
-        Vec<(String, String)>,                 // (title, url)
-    )> {
+        kind: MediaKind,
+        offset: usize,
+        limit: usize,
+    ) -> Result<MediaPageResult> {
         let mut stmt = self.conn.prepare(
             "SELECT msg_id, text, msg_type, ts, raw_json
              FROM messages
              WHERE thread_id = ?1 AND (
-                 msg_type IN ('chat.photo', 'chat.video', 'chat.file', 'chat.link')
-                 OR text LIKE '[Hình ảnh]%'
+                 raw_json LIKE '%link_url%'
+                 OR raw_json LIKE '%link_thumb%'
+                 OR text LIKE '%http://%'
+                 OR text LIKE '%https://%'
+                 OR msg_type IN ('chat.file', 'chat.video', 'chat.link')
                  OR text LIKE '[Tập tin]%'
-                 OR raw_json LIKE '%link_url%'
              )
-             ORDER BY ts DESC
-             LIMIT 150",
+             ORDER BY ts DESC",
         )?;
 
-        let mut photos = Vec::new();
-        let mut files = Vec::new();
-        let mut links = Vec::new();
+        let mut all_photos: Vec<MediaPhotoItem> = Vec::new();
+        let mut all_files: Vec<MediaFileItem> = Vec::new();
+        let mut all_links: Vec<MediaLinkItem> = Vec::new();
 
         let rows = stmt.query_map(params![thread_id], |row| {
             let msg_id: String = row.get(0)?;
@@ -454,54 +749,212 @@ impl MessageStore {
         })?;
 
         for r in rows.flatten() {
-            let (_msg_id, text, msg_type, ts, raw_json) = r;
-            let time_str = if ts > 0 { crate::clock::message_time(ts) } else { String::new() };
+            let (msg_id, text, msg_type, ts, raw_json) = r;
+            let time_str = if ts > 0 {
+                crate::clock::message_time(ts)
+            } else {
+                String::new()
+            };
 
-            let mut link_url = None;
-            let mut link_thumb = None;
-            let mut link_title = None;
-            let mut link_src = None;
+            let mut link_url: Option<String> = None;
+            let mut link_thumb: Option<String> = None;
+            let mut link_title: Option<String> = None;
+            let mut link_src: Option<String> = None;
 
             if !raw_json.is_empty() {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw_json) {
-                    link_url = v.get("link_url").and_then(|x| x.as_str()).map(str::to_string);
-                    link_thumb = v.get("link_thumb").and_then(|x| x.as_str()).map(str::to_string);
-                    link_title = v.get("link_title").and_then(|x| x.as_str()).map(str::to_string);
-                    link_src = v.get("link_src").and_then(|x| x.as_str()).map(str::to_string);
+                    link_url = v
+                        .get("link_url")
+                        .and_then(|x| x.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
+                    link_thumb = v
+                        .get("link_thumb")
+                        .and_then(|x| x.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
+                    link_title = v
+                        .get("link_title")
+                        .and_then(|x| x.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
+                    link_src = v
+                        .get("link_src")
+                        .and_then(|x| x.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
                 }
             }
 
-            let is_photo = msg_type == "chat.photo"
-                || link_src.as_deref() == Some("Hình ảnh Zalo")
-                || text.trim() == "[Hình ảnh]"
-                || text.trim().starts_with("[Hình ảnh] ");
-
-            let is_file = msg_type == "chat.file"
-                || link_src.as_deref() == Some("Tập tin Zalo")
-                || text.trim().starts_with("[Tập tin] ");
-
-            if is_photo && photos.len() < 36 {
-                let thumb = link_thumb.or_else(|| link_url.clone());
-                if let Some(t_url) = thumb.filter(|u| !u.is_empty()) {
-                    let full = link_url.unwrap_or_else(|| t_url.clone());
-                    let title = link_title.unwrap_or_else(|| "Hình ảnh".into());
-                    let key = format!("thumb_{}", crate::crypto::md5_hex(&t_url));
-                    photos.push((key, t_url, full, title));
+            // Fall back to direct URL extraction from `text` if `raw_json` lacked URLs
+            if link_url.is_none() && link_thumb.is_none() {
+                if let Some(first_url) = extract_http_urls(&text).into_iter().next() {
+                    link_url = Some(first_url);
                 }
-            } else if is_file && files.len() < 30 {
-                let fname = link_title.unwrap_or_else(|| {
-                    text.strip_prefix("[Tập tin] ").unwrap_or(&text).trim().to_string()
-                });
-                files.push((fname, time_str, link_url.unwrap_or_default()));
-            } else if let Some(url) = link_url {
-                if !url.is_empty() && !is_photo && !is_file && links.len() < 30 {
-                    let ltitle = link_title.unwrap_or_else(|| url.clone());
-                    links.push((ltitle, url));
+            }
+
+            let trimmed = text.trim();
+            let effective_url = link_url.as_deref().or(link_thumb.as_deref()).unwrap_or("");
+            let inferred_kind = if link_src.as_deref() == Some("Hình ảnh Zalo")
+                || msg_type == "chat.photo"
+                || trimmed == "[Hình ảnh]"
+                || trimmed.starts_with("[Hình ảnh] ")
+            {
+                MediaKind::Photos
+            } else if link_src.as_deref() == Some("Tập tin Zalo")
+                || msg_type == "chat.file"
+                || msg_type == "chat.video"
+                || trimmed.starts_with("[Tập tin] ")
+            {
+                MediaKind::Files
+            } else if !effective_url.is_empty() {
+                classify_url_kind(effective_url, &text, &msg_type)
+            } else {
+                continue;
+            };
+
+            match inferred_kind {
+                MediaKind::Photos => {
+                    let raw_thumb = link_thumb.or_else(|| link_url.clone());
+                    if let Some(t_url) = raw_thumb.filter(|u| u.starts_with("http")) {
+                        let safe_thumb = jxl_to_jpg_url(&t_url);
+                        let safe_full = link_url
+                            .filter(|u| u.starts_with("http"))
+                            .map(|u| jxl_to_jpg_url(&u))
+                            .unwrap_or_else(|| safe_thumb.clone());
+                        let title = link_title.unwrap_or_else(|| "Hình ảnh".into());
+                        let thumb_key = format!("thumb_{}", crate::crypto::md5_hex(&safe_thumb));
+                        all_photos.push(MediaPhotoItem {
+                            msg_id,
+                            thumb_key,
+                            thumb_url: safe_thumb,
+                            full_url: safe_full,
+                            title,
+                            time_str,
+                            ts,
+                        });
+                    }
+                }
+                MediaKind::Files => {
+                    let furl = link_url.unwrap_or_default();
+                    let raw_fname = link_title.filter(|s| !s.is_empty()).unwrap_or_else(|| {
+                        let stripped = trimmed
+                            .strip_prefix("[Tập tin]")
+                            .map(str::trim)
+                            .unwrap_or(trimmed);
+                        if !stripped.is_empty() && !stripped.starts_with("http") {
+                            stripped.to_string()
+                        } else if !furl.is_empty() {
+                            extract_filename_and_ext(&furl).0
+                        } else {
+                            "Tệp đính kèm".to_string()
+                        }
+                    });
+                    let (_, file_ext) = if raw_fname.contains('.') {
+                        extract_filename_and_ext(&raw_fname)
+                    } else if !furl.is_empty() {
+                        extract_filename_and_ext(&furl)
+                    } else {
+                        (raw_fname.clone(), "FILE".to_string())
+                    };
+                    all_files.push(MediaFileItem {
+                        msg_id,
+                        file_name: raw_fname,
+                        file_ext,
+                        time_str,
+                        file_url: furl,
+                        ts,
+                    });
+                }
+                MediaKind::Links => {
+                    if let Some(url) = link_url.filter(|u| u.starts_with("http")) {
+                        let domain = extract_domain_from_url(&url);
+                        let title = link_title.filter(|s| !s.is_empty()).unwrap_or_else(|| {
+                            let clean = trimmed.strip_prefix("[Link]").unwrap_or(trimmed).trim();
+                            let first_line = clean.lines().next().unwrap_or(clean).trim();
+                            if first_line.is_empty() || first_line.starts_with("http") {
+                                if domain.is_empty() {
+                                    url.clone()
+                                } else {
+                                    domain.clone()
+                                }
+                            } else {
+                                first_line.chars().take(80).collect()
+                            }
+                        });
+                        all_links.push(MediaLinkItem {
+                            msg_id,
+                            title,
+                            url,
+                            domain,
+                            time_str,
+                            ts,
+                        });
+                    }
                 }
             }
         }
 
-        Ok((photos, files, links))
+        let total_photos = all_photos.len();
+        let total_files = all_files.len();
+        let total_links = all_links.len();
+
+        let (photos, files, links) = if offset == 0 {
+            (
+                all_photos.into_iter().take(limit).collect(),
+                all_files.into_iter().take(limit).collect(),
+                all_links.into_iter().take(limit).collect(),
+            )
+        } else {
+            match kind {
+                MediaKind::Photos => (
+                    all_photos.into_iter().skip(offset).take(limit).collect(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                MediaKind::Files => (
+                    Vec::new(),
+                    all_files.into_iter().skip(offset).take(limit).collect(),
+                    Vec::new(),
+                ),
+                MediaKind::Links => (
+                    Vec::new(),
+                    Vec::new(),
+                    all_links.into_iter().skip(offset).take(limit).collect(),
+                ),
+            }
+        };
+
+        let has_more_photos = if offset == 0 || kind == MediaKind::Photos {
+            offset.saturating_add(photos.len()) < total_photos
+        } else {
+            false
+        };
+        let has_more_files = if offset == 0 || kind == MediaKind::Files {
+            offset.saturating_add(files.len()) < total_files
+        } else {
+            false
+        };
+        let has_more_links = if offset == 0 || kind == MediaKind::Links {
+            offset.saturating_add(links.len()) < total_links
+        } else {
+            false
+        };
+
+        Ok(MediaPageResult {
+            thread_id: thread_id.to_string(),
+            kind,
+            offset,
+            photos,
+            files,
+            links,
+            total_photos,
+            total_files,
+            total_links,
+            has_more_photos,
+            has_more_files,
+            has_more_links,
+        })
     }
 
     /// Retrieve all persisted thread metadata ordered by `last_ts` descending.
@@ -2039,6 +2492,64 @@ mod tests {
             newest.iter().map(|m| m.ts).collect::<Vec<_>>(),
             vec![200, 300]
         );
+    }
+
+    #[test]
+    fn test_conversation_media_page_and_classification() {
+        let mut store = MessageStore::open(":memory:").unwrap();
+        let thread_id = "test_media_thread";
+
+        let p1 = StoredMessage {
+            msg_id: "photo1".into(),
+            thread_id: thread_id.into(),
+            sender_id: "u1".into(),
+            sender_name: "User".into(),
+            text: "https://f15-zpc.zdn.vn/jxl/123/abc.jxl".into(),
+            msg_type: "chat.photo".into(),
+            ts: 100,
+            is_outgoing: false,
+            raw_json: "".into(),
+        };
+        let f1 = StoredMessage {
+            msg_id: "file1".into(),
+            thread_id: thread_id.into(),
+            sender_id: "u1".into(),
+            sender_name: "User".into(),
+            text: "[Tập tin] bao_cao_do_an.docx".into(),
+            msg_type: "chat.file".into(),
+            ts: 200,
+            is_outgoing: false,
+            raw_json: r#"{"link_src":"Tập tin Zalo","link_title":"bao_cao_do_an.docx","link_url":"https://f41-zfcloud.zdn.vn/doc/123"}"#.into(),
+        };
+        let l1 = StoredMessage {
+            msg_id: "link1".into(),
+            thread_id: thread_id.into(),
+            sender_id: "u1".into(),
+            sender_name: "User".into(),
+            text: "Check this out https://github.com/ctdoteam1110/ctdozlite".into(),
+            msg_type: "chat.link".into(),
+            ts: 300,
+            is_outgoing: false,
+            raw_json: "".into(),
+        };
+
+        store.upsert_message(&p1).unwrap();
+        store.upsert_message(&f1).unwrap();
+        store.upsert_message(&l1).unwrap();
+
+        let page = store
+            .conversation_media_page(thread_id, MediaKind::Photos, 0, 10)
+            .unwrap();
+        assert_eq!(page.total_photos, 1);
+        assert_eq!(page.total_files, 1);
+        assert_eq!(page.total_links, 1);
+        assert_eq!(
+            page.photos[0].thumb_url,
+            "https://f15-zpc.zdn.vn/jpg/123/abc.jpg"
+        );
+        assert_eq!(page.files[0].file_name, "bao_cao_do_an.docx");
+        assert_eq!(page.files[0].file_ext, "DOCX");
+        assert_eq!(page.links[0].domain, "github.com");
     }
 
     #[test]

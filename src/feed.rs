@@ -192,10 +192,7 @@ impl crate::session::Session {
         let dec = self.maybe_decrypt(resp, self.session_key_bytes()).await;
 
         if dec.get("error_code").and_then(Value::as_i64) == Some(0) {
-            if let Some(prof_obj) = dec
-                .get("data")
-                .and_then(|d| d.get(target_uid))
-            {
+            if let Some(prof_obj) = dec.get("data").and_then(|d| d.get(target_uid)) {
                 return SocialUserProfile::from_json(target_uid, prof_obj)
                     .ok_or_else(|| anyhow!("Failed to parse profile JSON for {target_uid}"));
             }
@@ -236,7 +233,11 @@ impl crate::session::Session {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string();
-                let url = p.get("url").and_then(Value::as_str).unwrap_or("").to_string();
+                let url = p
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
                 let thumbnail = p
                     .get("thumbnail")
                     .and_then(Value::as_str)
@@ -335,10 +336,7 @@ impl crate::session::Session {
                         avatar_url: my_ava,
                     },
                     date_str: "Kho ảnh cá nhân".to_string(),
-                    content: format!(
-                        "Album ảnh đại diện mạng xã hội ({} ảnh)",
-                        my_photos.len()
-                    ),
+                    content: format!("Album ảnh đại diện mạng xã hội ({} ảnh)", my_photos.len()),
                     status_badge: Some("Album ảnh".to_string()),
                     media_list: my_photos,
                     reaction: FeedReaction {
@@ -374,19 +372,27 @@ impl crate::session::Session {
         }
 
         // Sắp xếp theo thời gian hoạt động gần nhất
-        profiles.sort_by(|a, b| b.last_action_time.unwrap_or(0).cmp(&a.last_action_time.unwrap_or(0)));
+        profiles.sort_by(|a, b| {
+            b.last_action_time
+                .unwrap_or(0)
+                .cmp(&a.last_action_time.unwrap_or(0))
+        });
 
         // 3. Nạp bài đăng Nhật ký từ cơ sở dữ liệu tin nhắn/nhật ký của chính ctdozlite
         // Tuyệt đối không đọc đường dẫn cứng trong test_lab/ để không làm sai lệch dữ liệu của người dùng khác.
-        let local_db = std::env::var("ZALO_TIMELINE_DB")
-            .unwrap_or_else(|_| "zalo_history.db".to_string());
+        let local_db =
+            std::env::var("ZALO_TIMELINE_DB").unwrap_or_else(|_| "zalo_history.db".to_string());
         if std::path::Path::new(&local_db).exists() {
             if let Ok(mut real_feeds) = load_real_timeline_from_sqlite(&local_db, "") {
                 if !real_feeds.is_empty() {
                     for rf in &mut real_feeds {
                         if let Some(prof) = profiles.iter().find(|p| {
-                            p.display_name.trim().eq_ignore_ascii_case(rf.author.display_name.trim())
-                                || p.zalo_name.trim().eq_ignore_ascii_case(rf.author.display_name.trim())
+                            p.display_name
+                                .trim()
+                                .eq_ignore_ascii_case(rf.author.display_name.trim())
+                                || p.zalo_name
+                                    .trim()
+                                    .eq_ignore_ascii_case(rf.author.display_name.trim())
                         }) {
                             rf.author.uid = prof.uid.clone();
                             if !prof.avatar_url.is_empty() {
@@ -501,8 +507,10 @@ pub fn load_real_timeline_from_sqlite(db_path: &str, target_uid: &str) -> Result
                                 .get("photo_dimension")
                                 .cloned()
                                 .unwrap_or(json!({}));
-                            let width = dim.get("width").and_then(Value::as_u64).unwrap_or(0) as u32;
-                            let height = dim.get("height").and_then(Value::as_u64).unwrap_or(0) as u32;
+                            let width =
+                                dim.get("width").and_then(Value::as_u64).unwrap_or(0) as u32;
+                            let height =
+                                dim.get("height").and_then(Value::as_u64).unwrap_or(0) as u32;
                             media_list.push(FeedMedia {
                                 photo_id: photoid,
                                 media_type: "image".to_string(),
@@ -585,7 +593,10 @@ mod tests {
             assert_eq!(feeds.len(), 2, "Phải nạp được đúng 2 bài viết thật của Đtc");
 
             // Kiểm tra bài đăng 1 (FPT University)
-            let f1 = feeds.iter().find(|f| f.feed_id == "18223066329").expect("Phải có feed 18223066329");
+            let f1 = feeds
+                .iter()
+                .find(|f| f.feed_id == "18223066329")
+                .expect("Phải có feed 18223066329");
             assert_eq!(f1.author.display_name, "Đtc");
             assert_eq!(f1.reaction.like_count, 16);
             assert_eq!(f1.reaction.comment_count, 6);
@@ -594,7 +605,10 @@ mod tests {
             assert!(f1.media_list[0].url.ends_with(".jpg"));
 
             // Kiểm tra bài đăng 2 (Bão lũ an toàn)
-            let f2 = feeds.iter().find(|f| f.feed_id == "18193461996").expect("Phải có feed 18193461996");
+            let f2 = feeds
+                .iter()
+                .find(|f| f.feed_id == "18193461996")
+                .expect("Phải có feed 18193461996");
             assert_eq!(f2.author.display_name, "Đtc");
             assert_eq!(f2.reaction.like_count, 6);
             assert_eq!(f2.reaction.comment_count, 0);

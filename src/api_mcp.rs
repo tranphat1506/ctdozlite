@@ -284,7 +284,10 @@ pub async fn handle_mcp_request(
         })),
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-            let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            let args = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
             let (is_err, payload) = execute_tool_call(session, name, &args, db_path).await;
             Some(json!({
                 "jsonrpc": "2.0",
@@ -372,7 +375,10 @@ async fn execute_tool_call(
         }
         "zalo_get_messages" => {
             let Some(tid) = args.get("thread_id").and_then(Value::as_str) else {
-                return (true, json!({ "error": "Missing required argument: thread_id" }));
+                return (
+                    true,
+                    json!({ "error": "Missing required argument: thread_id" }),
+                );
             };
             let limit = args
                 .get("limit")
@@ -405,7 +411,10 @@ async fn execute_tool_call(
             let Some(text) = args.get("text").and_then(Value::as_str) else {
                 return (true, json!({ "error": "Missing required argument: text" }));
             };
-            let is_group = args.get("is_group").and_then(Value::as_bool).unwrap_or(false);
+            let is_group = args
+                .get("is_group")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let s = session.lock().await.clone();
             let res = if is_group {
                 chat::send_group_message(&s, to_id, text).await
@@ -413,7 +422,10 @@ async fn execute_tool_call(
                 chat::send_message(&s, to_id, text).await
             };
             match res {
-                Ok(resp) => (false, json!({ "ok": true, "to_id": to_id, "response": resp })),
+                Ok(resp) => (
+                    false,
+                    json!({ "ok": true, "to_id": to_id, "response": resp }),
+                ),
                 Err(e) => (true, json!({ "error": e.to_string() })),
             }
         }
@@ -431,7 +443,10 @@ async fn execute_tool_call(
                 .get("thread_name")
                 .and_then(Value::as_str)
                 .unwrap_or(to_id);
-            let is_group = args.get("is_group").and_then(Value::as_bool).unwrap_or(false);
+            let is_group = args
+                .get("is_group")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let now_ts = crate::login::unix_now();
             let deliver_at = match when.parse::<i64>() {
                 Ok(ts) if ts > now_ts => ts,
@@ -454,10 +469,7 @@ async fn execute_tool_call(
             }
         }
         "zalo_configure_autoreply" => {
-            let action = args
-                .get("action")
-                .and_then(Value::as_str)
-                .unwrap_or("list");
+            let action = args.get("action").and_then(Value::as_str).unwrap_or("list");
             let mut rules = load_autoreply_rules();
             match action {
                 "list" => (false, json!({ "rules": rules })),
@@ -502,7 +514,10 @@ async fn execute_tool_call(
                     }
                     (false, json!({ "ok": true, "rules": rules }))
                 }
-                _ => (true, json!({ "error": format!("Unsupported action: {action}") })),
+                _ => (
+                    true,
+                    json!({ "error": format!("Unsupported action: {action}") }),
+                ),
             }
         }
         _ => (true, json!({ "error": format!("Unknown tool: {name}") })),
@@ -649,7 +664,9 @@ pub async fn handle_rest_request(
                 Err(e) => (500, json!({ "ok": false, "error": e.to_string() })),
             }
         }
-        ("GET", "/api/v1/autoreply") => (200, json!({ "ok": true, "rules": load_autoreply_rules() })),
+        ("GET", "/api/v1/autoreply") => {
+            (200, json!({ "ok": true, "rules": load_autoreply_rules() }))
+        }
         ("POST", "/api/v1/autoreply") => {
             let payload: Value = serde_json::from_str(body).unwrap_or_else(|_| json!({}));
             if let Some(arr) = payload.get("rules").and_then(Value::as_array) {
@@ -783,8 +800,7 @@ pub async fn run_local_http_server(
                 }
             }
 
-            let (status, json_val) =
-                handle_rest_request(&sess, method, path, body_part, &db).await;
+            let (status, json_val) = handle_rest_request(&sess, method, path, body_part, &db).await;
             let status_text = match status {
                 200 => "200 OK",
                 202 => "202 Accepted",
@@ -913,14 +929,8 @@ mod tests {
         assert!(tools.iter().any(|t| t["name"] == "zalo_schedule_message"));
 
         // 3. REST search
-        let (status, search_val) = handle_rest_request(
-            &session,
-            "GET",
-            "/api/v1/search?q=MCP",
-            "",
-            db_path,
-        )
-        .await;
+        let (status, search_val) =
+            handle_rest_request(&session, "GET", "/api/v1/search?q=MCP", "", db_path).await;
         assert_eq!(status, 200);
         assert_eq!(search_val["results"].as_array().unwrap().len(), 1);
 

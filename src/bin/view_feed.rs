@@ -42,7 +42,10 @@ fn main() -> Result<()> {
     for (idx, item) in feeds.iter().enumerate() {
         println!("----------------------------------------------------------------------");
         println!("📌 BÀI ĐĂNG #{} [Feed ID: {}]", idx + 1, item.feed_id);
-        println!("👤 Tác giả:   {} (UID: {})", item.author.display_name, item.author.uid);
+        println!(
+            "👤 Tác giả:   {} (UID: {})",
+            item.author.display_name, item.author.uid
+        );
         println!("🕒 Thời gian: {}", item.date_str);
         println!(
             "❤️ Tương tác: {} lượt thích | 💬 {} bình luận",

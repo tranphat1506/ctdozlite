@@ -6776,9 +6776,7 @@ pub fn parse_board_topics(resp: &Value) -> Vec<BoardTopic> {
         let mut msg_ids: Vec<String> = Vec::new();
         if let Some(params) = item.get("params") {
             let params = match params {
-                Value::String(txt) => {
-                    serde_json::from_str::<Value>(txt).unwrap_or(Value::Null)
-                }
+                Value::String(txt) => serde_json::from_str::<Value>(txt).unwrap_or(Value::Null),
                 other => other.clone(),
             };
             collect_msg_ids(&params, &mut msg_ids);
@@ -6928,8 +6926,6 @@ pub async fn list_board_topics(
 
     anyhow::bail!("{}", errors.join(" · "))
 }
-
-
 
 /// Pin or unpin a conversation (`updatePinnedConversationsV2` @ `compact-app-pc.js:14354215`, cmd `12122`).
 pub async fn update_pinned_conversation(

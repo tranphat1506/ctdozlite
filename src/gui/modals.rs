@@ -919,11 +919,12 @@ impl ZaloGuiApp {
         let Some((ref text, ts)) = self.toast_notice else {
             return;
         };
-        let display_duration = if text.contains("⚠️") || text.contains("Lỗi") || text.contains("thất bại") {
-            Duration::from_millis(8000)
-        } else {
-            Duration::from_millis(4000)
-        };
+        let display_duration =
+            if text.contains("⚠️") || text.contains("Lỗi") || text.contains("thất bại") {
+                Duration::from_millis(8000)
+            } else {
+                Duration::from_millis(4000)
+            };
         if ts.elapsed() > display_duration {
             self.toast_notice = None;
             return;
@@ -1084,18 +1085,20 @@ impl ZaloGuiApp {
                                                 .strong(),
                                         );
                                         let (f_lbl, f_col) = match prof.friendship {
-                                            crate::chat::FriendshipStatus::Friend => {
-                                                (format!("{} Bạn bè", lucide::CHECK), pal.accent_online)
-                                            }
+                                            crate::chat::FriendshipStatus::Friend => (
+                                                format!("{} Bạn bè", lucide::CHECK),
+                                                pal.accent_online,
+                                            ),
                                             crate::chat::FriendshipStatus::IncomingPending => {
                                                 ("Chờ bạn đồng ý".to_string(), pal.primary_hover)
                                             }
                                             crate::chat::FriendshipStatus::OutgoingPending => {
                                                 ("Đã gửi lời mời".to_string(), pal.warning)
                                             }
-                                            crate::chat::FriendshipStatus::Stranger => {
-                                                ("Chưa kết bạn".to_string(), Color32::from_rgb(249, 115, 22))
-                                            }
+                                            crate::chat::FriendshipStatus::Stranger => (
+                                                "Chưa kết bạn".to_string(),
+                                                Color32::from_rgb(249, 115, 22),
+                                            ),
                                             crate::chat::FriendshipStatus::Unknown => {
                                                 ("Đang kiểm tra…".to_string(), pal.text_muted)
                                             }

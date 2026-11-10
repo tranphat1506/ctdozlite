@@ -204,12 +204,18 @@ fn group_history_preserves_distinct_server_ids_when_text_and_time_match() {
 #[test]
 fn preview_parser_retains_legacy_id_and_explicit_wire_namespaces() {
     let mut threads = vec![thread(Vec::new())];
-    zalo_rust::chat::merge_previews(&mut threads, &json!({"error_code":0,"data":[{"messages":[
-        {"globalMsgId":"server-a","cliMsgId":"client-a","idTo":"contact-1","uidFrom":"0","content":"First"},
-        {"cliMsgId":"client-only","idTo":"contact-1","uidFrom":"0","content":"Second"}
-    ]}]}));
+    zalo_rust::chat::merge_previews(
+        &mut threads,
+        &json!({"error_code":0,"data":[{"messages":[
+            {"globalMsgId":"server-a","cliMsgId":"client-a","idTo":"contact-1","uidFrom":"0","content":"First"},
+            {"cliMsgId":"client-only","idTo":"contact-1","uidFrom":"0","content":"Second"}
+        ]}]}),
+    );
     assert_eq!(threads[0].messages[0].id, "client-a");
-    assert_eq!(threads[0].messages[0].wire_ref.server_id, Some(json!("server-a")));
+    assert_eq!(
+        threads[0].messages[0].wire_ref.server_id,
+        Some(json!("server-a"))
+    );
     assert_eq!(threads[0].messages[0].client_message_id, "client-a");
     assert_eq!(threads[0].messages[1].id, "client-only");
     assert_eq!(threads[0].messages[1].client_message_id, "client-only");
@@ -262,7 +268,10 @@ fn legacy_stored_client_id_reconciles_without_changing_canonical_id() {
     zalo_rust::chat::merge_previews(&mut threads, &response);
     assert_eq!(threads[0].messages.len(), 1);
     assert_eq!(threads[0].messages[0].id, "client-legacy");
-    assert_eq!(threads[0].messages[0].wire_ref.server_id, Some(json!("server-a")));
+    assert_eq!(
+        threads[0].messages[0].wire_ref.server_id,
+        Some(json!("server-a"))
+    );
     zalo_rust::chat::merge_previews(&mut threads, &response);
     assert_eq!(threads[0].messages.len(), 1);
 }
