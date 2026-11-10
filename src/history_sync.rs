@@ -85,9 +85,34 @@ fn next_cursor(t: &Thread, current: &str) -> Option<String> {
 static LATEST_MOBILE_TEMP_KEY: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
 /// Record a fresh `temp_key` received from a `transfer_after_login` control event.
+/// If the key changes, any stale RSA sync keys are cleared so the new session starts clean.
 pub fn set_latest_mobile_temp_key(temp_key: &str) {
+    let trimmed = temp_key.trim().to_string();
+    let changed = if let Ok(mut g) = LATEST_MOBILE_TEMP_KEY.lock() {
+        let is_diff = *g != trimmed;
+        *g = trimmed;
+        is_diff
+    } else {
+        false
+    };
+    if changed {
+        clear_sync_keys();
+    }
+}
+
+/// Clear the stored `temp_key` (e.g. after a sync finishes, is rejected, or reports invalid).
+pub fn clear_latest_mobile_temp_key() {
     if let Ok(mut g) = LATEST_MOBILE_TEMP_KEY.lock() {
-        *g = temp_key.trim().to_string();
+        g.clear();
+    }
+}
+
+/// Consume and clear the stored `temp_key` atomically so a single-use token is never re-sent.
+pub fn take_latest_mobile_temp_key() -> String {
+    if let Ok(mut g) = LATEST_MOBILE_TEMP_KEY.lock() {
+        std::mem::take(&mut *g)
+    } else {
+        String::new()
     }
 }
 
@@ -158,6 +183,12 @@ pub fn clear_sync_keys() {
     let _ = std::fs::remove_file(sync_rsa_key_path());
 }
 
+/// Clear any stale RSA sync keys and generate a fresh 2048-bit RSA SubjectPublicKeyInfo (`SPKI`) DER Base64 key.
+pub fn generate_fresh_sync_public_key() -> String {
+    clear_sync_keys();
+    generate_sync_public_key()
+}
+
 /// Generate or reuse a genuine 2048-bit RSA SubjectPublicKeyInfo (`SPKI`) DER Base64 key.
 pub fn generate_sync_public_key() -> String {
     use base64::Engine;
@@ -226,22 +257,29 @@ where
     if s.login.is_none() {
         anyhow::bail!("chưa đăng nhập");
     }
-    let pub_key = generate_sync_public_key();
+    let pub_key = if send_phone_prompt {
+        generate_fresh_sync_public_key()
+    } else {
+        get_sync_public_key().unwrap_or_default()
+    };
     let before_total: usize = threads.iter().map(|t| t.messages.len()).sum();
 
     if send_phone_prompt {
         set_last_mobile_sync_status(None);
+
+        // Consume single-use `temp_key` once so stale keys are never re-sent on retry
+        let temp_key = take_latest_mobile_temp_key();
 
         // Phase 1: Send mobile wake-up / pull request to phone (`cmd 12000` + WebSocket `cmd 592` & `cmd 590`)
         on_progress(
             0.10,
             "📲 Đang gửi yêu cầu đồng bộ tới Zalo trên điện thoại (hãy mở Zalo trên điện thoại và bấm 'Đồng bộ ngay')…".to_string(),
         );
-        let r1 = chat::request_phone_sync(s, &pub_key).await;
+        let r1 = chat::request_phone_sync_with_temp_key(s, &pub_key, &temp_key).await;
         if let Ok(ref val) = r1 {
             chat::merge_previews(threads, val);
         }
-        let _ = chat::request_phone_sync_v2(s, &pub_key).await;
+        let _ = chat::request_phone_sync_v2_with_temp_key(s, &pub_key, &temp_key).await;
 
         // Wait for user to confirm on phone (up to 90 seconds)
         let deadline = std::time::Instant::now() + Duration::from_secs(90);
@@ -249,6 +287,8 @@ where
         while std::time::Instant::now() < deadline {
             if PHONE_SYNC_CANCEL.load(Ordering::Relaxed) {
                 let _ = chat::cancel_phone_sync(s, &pub_key).await;
+                clear_sync_keys();
+                clear_latest_mobile_temp_key();
                 return Ok((0, 0));
             }
             if let Some(ref st) = last_mobile_sync_status() {
@@ -261,7 +301,14 @@ where
                     confirmed = true;
                     on_progress(0.40, st.clone());
                     break;
-                } else if st.contains("từ chối") {
+                } else if st.contains("từ chối")
+                    || st.contains("lỗi đồng bộ")
+                    || st.contains("temp key invalid")
+                    || st.contains("Không thể")
+                    || st.contains("thất bại")
+                {
+                    clear_sync_keys();
+                    clear_latest_mobile_temp_key();
                     on_progress(1.0, st.clone());
                     return Ok((0, 0));
                 } else {
@@ -275,10 +322,13 @@ where
             let finish_deadline = std::time::Instant::now() + Duration::from_secs(45);
             while std::time::Instant::now() < finish_deadline {
                 if let Some(ref st) = last_mobile_sync_status() {
-                    if st.contains("thành công") {
-                        on_progress(1.0, st.clone());
-                        break;
-                    } else if st.contains("Không thể") || st.contains("thất bại") {
+                    if st.contains("thành công")
+                        || st.contains("Không thể")
+                        || st.contains("thất bại")
+                        || st.contains("lỗi đồng bộ")
+                    {
+                        clear_sync_keys();
+                        clear_latest_mobile_temp_key();
                         on_progress(1.0, st.clone());
                         break;
                     } else {
@@ -287,6 +337,10 @@ where
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
+        } else {
+            // Timed out waiting for phone confirmation: clear active keys so next sync uses fresh keys
+            clear_sync_keys();
+            clear_latest_mobile_temp_key();
         }
     }
 
@@ -779,36 +833,38 @@ pub async fn import_mobile_backup_container(
                     } else {
                         text.as_str()
                     };
-                    let kind = crate::store::classify_url_kind(&first_url, hint, &msg_type);
-                    match kind {
-                        crate::store::MediaKind::Photos => {
-                            let safe = crate::store::jxl_to_jpg_url(&first_url);
-                            msg_type = "chat.photo".to_string();
-                            raw_json = serde_json::json!({
-                                "link_src": "Hình ảnh Zalo",
-                                "link_url": safe,
-                                "link_thumb": safe,
-                            })
-                            .to_string();
-                        }
-                        crate::store::MediaKind::Files => {
-                            let (fname, _) = crate::store::extract_filename_and_ext(&first_url);
-                            msg_type = "chat.file".to_string();
-                            raw_json = serde_json::json!({
-                                "link_src": "Tập tin Zalo",
-                                "link_title": fname,
-                                "link_url": first_url,
-                            })
-                            .to_string();
-                        }
-                        crate::store::MediaKind::Links => {
-                            let dom = crate::store::extract_domain_from_url(&first_url);
-                            msg_type = "chat.link".to_string();
-                            raw_json = serde_json::json!({
-                                "link_url": first_url,
-                                "link_title": if dom.is_empty() { first_url.clone() } else { dom },
-                            })
-                            .to_string();
+                    if let Some(kind) = crate::store::classify_url_kind(&first_url, hint, &msg_type)
+                    {
+                        match kind {
+                            crate::store::MediaKind::Photos => {
+                                let safe = crate::store::jxl_to_jpg_url(&first_url);
+                                msg_type = "chat.photo".to_string();
+                                raw_json = serde_json::json!({
+                                    "link_src": "Hình ảnh Zalo",
+                                    "link_url": safe,
+                                    "link_thumb": safe,
+                                })
+                                .to_string();
+                            }
+                            crate::store::MediaKind::Files => {
+                                let (fname, _) = crate::store::extract_filename_and_ext(&first_url);
+                                msg_type = "chat.file".to_string();
+                                raw_json = serde_json::json!({
+                                    "link_src": "Tập tin Zalo",
+                                    "link_title": fname,
+                                    "link_url": first_url,
+                                })
+                                .to_string();
+                            }
+                            crate::store::MediaKind::Links => {
+                                let dom = crate::store::extract_domain_from_url(&first_url);
+                                msg_type = "chat.link".to_string();
+                                raw_json = serde_json::json!({
+                                    "link_url": first_url,
+                                    "link_title": if dom.is_empty() { first_url.clone() } else { dom },
+                                })
+                                .to_string();
+                            }
                         }
                     }
                 }
@@ -843,6 +899,7 @@ pub async fn import_mobile_backup_container(
     // Notify Zalo server and phone that snapshot is downloaded, dismissing mobile spinner
     let _ = crate::chat::clean_sync(s, &pub_key_b64).await;
     clear_sync_keys();
+    clear_latest_mobile_temp_key();
 
     Ok(total_imported)
 }
@@ -1425,5 +1482,16 @@ mod tests {
         // Ghi đè cùng sync_id không trùng lặp.
         record_sync_v2_session("sync-1", "sess-bbb");
         assert!(has_sync_v2_session("sync-1"));
+    }
+
+    #[test]
+    fn temp_key_is_single_use_and_clears_safely() {
+        set_latest_mobile_temp_key("tok-1");
+        assert_eq!(latest_mobile_temp_key(), "tok-1");
+        assert_eq!(take_latest_mobile_temp_key(), "tok-1");
+        assert_eq!(latest_mobile_temp_key(), "");
+        set_latest_mobile_temp_key("tok-2");
+        clear_latest_mobile_temp_key();
+        assert_eq!(latest_mobile_temp_key(), "");
     }
 }

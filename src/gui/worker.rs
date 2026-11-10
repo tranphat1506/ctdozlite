@@ -609,14 +609,18 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                         temp_key,
                                                     } => {
                                                         crate::history_sync::set_latest_mobile_temp_key(&temp_key);
-                                                        let known = crate::chat::load_threads_cache();
-                                                        if let Some(wtx) = WORKER_TX.get() {
-                                                            let _ = wtx.send(
-                                                                WorkerCmd::SyncPhoneMessages {
-                                                                    threads: known,
-                                                                    send_phone_prompt: false,
-                                                                },
-                                                            );
+                                                        if !crate::history_sync::PHONE_SYNC_RUNNING
+                                                            .load(std::sync::atomic::Ordering::SeqCst)
+                                                        {
+                                                            let known = crate::chat::load_threads_cache();
+                                                            if let Some(wtx) = WORKER_TX.get() {
+                                                                let _ = wtx.send(
+                                                                    WorkerCmd::SyncPhoneMessages {
+                                                                        threads: known,
+                                                                        send_phone_prompt: false,
+                                                                    },
+                                                                );
+                                                            }
                                                         }
                                                     }
                                                     crate::chat::MobileSyncControlEvent::WaitingConfirmOnPhone { .. } => {
@@ -638,13 +642,17 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                         ctx_ws.request_repaint();
                                                     }
                                                     crate::chat::MobileSyncControlEvent::UserRejected => {
+                                                        crate::history_sync::clear_latest_mobile_temp_key();
+                                                        crate::history_sync::clear_sync_keys();
                                                         let note = "⚠️ Bạn đã từ chối yêu cầu đồng bộ tin nhắn trên điện thoại".to_string();
                                                         crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
                                                         let _ = gui_tx_ws.send(GuiEvent::StatusUpdate(note));
                                                         ctx_ws.request_repaint();
                                                     }
                                                     crate::chat::MobileSyncControlEvent::SyncError { message } => {
-                                                        let note = format!("⚠️ Lỗi từ điện thoại: {message}");
+                                                        crate::history_sync::clear_latest_mobile_temp_key();
+                                                        crate::history_sync::clear_sync_keys();
+                                                        let note = format!("⚠️ Điện thoại phản hồi lỗi đồng bộ: {message}");
                                                         crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
                                                         let _ = gui_tx_ws.send(GuiEvent::StatusUpdate(note));
                                                         ctx_ws.request_repaint();
@@ -886,12 +894,16 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                 ctx_ctrl.request_repaint();
                                             }
                                             crate::chat::MobileSyncControlEvent::UserRejected => {
+                                                crate::history_sync::clear_latest_mobile_temp_key();
+                                                crate::history_sync::clear_sync_keys();
                                                 let note = "⚠️ Bạn đã từ chối yêu cầu đồng bộ tin nhắn trên điện thoại".to_string();
                                                 crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
                                                 let _ = gui_tx_ctrl.send(GuiEvent::StatusUpdate(note));
                                                 ctx_ctrl.request_repaint();
                                             }
                                             crate::chat::MobileSyncControlEvent::SyncError { message } => {
+                                                crate::history_sync::clear_latest_mobile_temp_key();
+                                                crate::history_sync::clear_sync_keys();
                                                 let err = format!("⚠️ Điện thoại phản hồi lỗi đồng bộ: {message}");
                                                 eprintln!("[sync] {err}");
                                                 crate::history_sync::set_last_mobile_sync_status(Some(err.clone()));
@@ -1511,13 +1523,17 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                         ctx_clone.request_repaint();
 
                                                         // Automatically sync Cloud/Group messages upon login without spamming phone prompt (#73)
-                                                        if let Some(wtx) = WORKER_TX.get() {
-                                                            let _ = wtx.send(
-                                                                WorkerCmd::SyncPhoneMessages {
-                                                                    threads: sync_snapshot,
-                                                                    send_phone_prompt: false,
-                                                                },
-                                                            );
+                                                        if !crate::history_sync::PHONE_SYNC_RUNNING
+                                                            .load(std::sync::atomic::Ordering::SeqCst)
+                                                        {
+                                                            if let Some(wtx) = WORKER_TX.get() {
+                                                                let _ = wtx.send(
+                                                                    WorkerCmd::SyncPhoneMessages {
+                                                                        threads: sync_snapshot,
+                                                                        send_phone_prompt: false,
+                                                                    },
+                                                                );
+                                                            }
                                                         }
 
                                                         let s_kw = s.clone();
@@ -1791,13 +1807,17 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                                             ctx_clone.request_repaint();
                                                         }
                                                         crate::chat::MobileSyncControlEvent::UserRejected => {
+                                                            crate::history_sync::clear_latest_mobile_temp_key();
+                                                            crate::history_sync::clear_sync_keys();
                                                             let note = "⚠️ Bạn đã từ chối yêu cầu đồng bộ tin nhắn trên điện thoại".to_string();
                                                             crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
                                                             let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(note));
                                                             ctx_clone.request_repaint();
                                                         }
                                                         crate::chat::MobileSyncControlEvent::SyncError { message } => {
-                                                            let note = format!("⚠️ Lỗi từ điện thoại: {message}");
+                                                            crate::history_sync::clear_latest_mobile_temp_key();
+                                                            crate::history_sync::clear_sync_keys();
+                                                            let note = format!("⚠️ Điện thoại phản hồi lỗi đồng bộ: {message}");
                                                             crate::history_sync::set_last_mobile_sync_status(Some(note.clone()));
                                                             let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(note));
                                                             ctx_clone.request_repaint();
@@ -2846,6 +2866,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                             // (`ClientFingerprint.imageAccept` in Olaz). It does not
                                             // advertise AVIF, and this build cannot decode it.
                                             .header("Accept", "image/webp,image/apng,image/*,*/*;q=0.8")
+                                            .timeout(std::time::Duration::from_secs(6))
                                             .send()
                                             .await
                                         {

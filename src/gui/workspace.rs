@@ -357,17 +357,25 @@ impl ZaloGuiApp {
                         ))
                         .clicked()
                     {
-                        self.phone_sync_progress = 0.05;
-                        self.phone_sync_status =
-                            "📲 Đang gửi yêu cầu đồng bộ tin nhắn tới điện thoại…".into();
-                        let threads = self.threads.clone();
-                        if let Some(tx) = WORKER_TX.get() {
-                            let _ = tx.send(WorkerCmd::SyncPhoneMessages {
-                                threads,
-                                send_phone_prompt: true,
-                            });
+                        if crate::history_sync::PHONE_SYNC_RUNNING
+                            .load(std::sync::atomic::Ordering::SeqCst)
+                        {
+                            self.show_toast(
+                                "⏳ Tiến trình đồng bộ đang chạy, vui lòng chờ hoàn tất…",
+                            );
+                        } else {
+                            self.phone_sync_progress = 0.05;
+                            self.phone_sync_status =
+                                "📲 Đang gửi yêu cầu đồng bộ tin nhắn tới điện thoại…".into();
+                            let threads = self.threads.clone();
+                            if let Some(tx) = WORKER_TX.get() {
+                                let _ = tx.send(WorkerCmd::SyncPhoneMessages {
+                                    threads,
+                                    send_phone_prompt: true,
+                                });
+                            }
+                            self.show_toast("📲 Đang gửi yêu cầu đồng bộ tin nhắn tới điện thoại…");
                         }
-                        self.show_toast("📲 Đang gửi yêu cầu đồng bộ tin nhắn tới điện thoại…");
                     }
 
                     ui.add_space(6.0);
@@ -2431,9 +2439,10 @@ impl ZaloGuiApp {
                                                 } else {
                                                     let avail_w = ui.available_width() - 4.0;
                                                     let tile_w = ((avail_w - 8.0) / 3.0).floor().clamp(60.0, 96.0);
-                                                    let mut network_budget = 6;
+                                                    let mut network_budget = 10;
                                                     let mut pending_images = false;
                                                     let mut click_photo_action: Option<(String, String, String, String)> = None;
+                                                    let small_page = self.drawer_media.photos.len() <= 60;
 
                                                     ui.horizontal_wrapped(|ui| {
                                                         ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
@@ -2441,10 +2450,11 @@ impl ZaloGuiApp {
                                                             let (cell_r, cell_resp) = ui.allocate_exact_size(Vec2::splat(tile_w), Sense::click());
                                                             let is_visible = ui.is_rect_visible(cell_r);
 
-                                                            // Lazy network-throttled thumbnail fetching for visible tiles
-                                                            if is_visible
+                                                            // Lazy network-throttled thumbnail fetching
+                                                            if (is_visible || small_page)
                                                                 && network_budget > 0
                                                                 && !self.sticker_textures.contains_key(&p.thumb_key)
+                                                                && !self.failed_media_keys.contains(&p.thumb_key)
                                                                 && self.loading_stickers.insert(p.thumb_key.clone())
                                                             {
                                                                 network_budget -= 1;
@@ -2456,6 +2466,7 @@ impl ZaloGuiApp {
                                                                 }
                                                             }
 
+                                                            let is_expired = self.failed_media_keys.contains(&p.thumb_key);
                                                             if let Some(tex) = self.sticker_textures.get(&p.thumb_key) {
                                                                 ui.painter().rect_filled(cell_r, Rounding::same(6.0), pal.bg_elevated);
                                                                 ui.painter().image(
@@ -2463,6 +2474,16 @@ impl ZaloGuiApp {
                                                                     cell_r,
                                                                     Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                                                                     Color32::WHITE,
+                                                                );
+                                                            } else if is_expired {
+                                                                ui.painter().rect_filled(cell_r, Rounding::same(6.0), pal.bg_input);
+                                                                draw_icon_image(ui.painter(), cell_r.center() - Vec2::new(0.0, 6.0), 16.0, pal.text_muted);
+                                                                ui.painter().text(
+                                                                    cell_r.center() + Vec2::new(0.0, 12.0),
+                                                                    egui::Align2::CENTER_CENTER,
+                                                                    "Hết hạn",
+                                                                    FontId::proportional(9.5),
+                                                                    pal.text_muted,
                                                                 );
                                                             } else {
                                                                 pending_images = true;
@@ -2487,9 +2508,14 @@ impl ZaloGuiApp {
                                                                 Stroke::new(1.0_f32, border_col),
                                                             );
 
+                                                            let hover_tip = if is_expired {
+                                                                "Ảnh đã hết hạn trên máy chủ Zalo"
+                                                            } else {
+                                                                "Xem ảnh phóng to"
+                                                            };
                                                             if cell_resp
                                                                 .on_hover_cursor(CursorIcon::PointingHand)
-                                                                .on_hover_text("Xem ảnh phóng to")
+                                                                .on_hover_text(hover_tip)
                                                                 .clicked()
                                                             {
                                                                 click_photo_action = Some((

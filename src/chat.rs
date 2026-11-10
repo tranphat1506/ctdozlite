@@ -7564,12 +7564,21 @@ pub async fn request_phone_sync_with_temp_key(
 /// `cmd 592` (wake-up) + `cmd 590` (SYNC_MESSAGE.REQUEST) — KHÔNG có HTTP REST
 /// `/api/transfer-sync-v2/request-sync` (404 mọi host, #87); cmd 12888 trong
 /// bundle Zalo chỉ là command-id, dispatch qua WS runner.
-pub async fn request_phone_sync_v2(s: &Session, _public_key: &str) -> Result<Value> {
+pub async fn request_phone_sync_v2(s: &Session, public_key: &str) -> Result<Value> {
+    let temp_key = crate::history_sync::latest_mobile_temp_key();
+    request_phone_sync_v2_with_temp_key(s, public_key, &temp_key).await
+}
+
+/// Request transfer-sync v2 from phone with an explicit `temp_key`.
+pub async fn request_phone_sync_v2_with_temp_key(
+    s: &Session,
+    _public_key: &str,
+    temp_key: &str,
+) -> Result<Value> {
     if s.login.is_none() {
         anyhow::bail!("chưa đăng nhập");
     }
     let sync_id = crate::param_cipher::random_hex(32);
-    let temp_key = crate::history_sync::latest_mobile_temp_key();
     // Sync V2 BẮT BUỘC có keypair thật từ WASM libzproto (host bằng wasmtime,
     // không cần Node.js). Fail rõ ở đây thay vì gửi request rác.
     let keys = crate::history_sync::generate_sync_v2_keys().map_err(|e| {

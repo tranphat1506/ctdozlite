@@ -3534,17 +3534,22 @@ impl ZaloGuiApp {
             self.show_toast(format!("Bắt đầu đồng bộ lịch sử {n} hội thoại nhóm/Cloud…"));
         }
         if trigger_phone_sync {
-            self.phone_sync_progress = 0.05;
-            self.phone_sync_status = "📲 Đang gửi yêu cầu đồng bộ tin nhắn tới điện thoại…".into();
-            let threads = self.threads.clone();
-            if let Some(tx) = WORKER_TX.get() {
-                let _ = tx.send(WorkerCmd::SyncPhoneMessages {
-                    threads,
-                    send_phone_prompt: true,
-                });
+            if crate::history_sync::PHONE_SYNC_RUNNING.load(std::sync::atomic::Ordering::SeqCst) {
+                self.show_toast("⏳ Tiến trình đồng bộ đang chạy, vui lòng chờ hoàn tất…");
+            } else {
+                self.phone_sync_progress = 0.05;
+                self.phone_sync_status =
+                    "📲 Đang gửi yêu cầu đồng bộ tin nhắn tới điện thoại…".into();
+                let threads = self.threads.clone();
+                if let Some(tx) = WORKER_TX.get() {
+                    let _ = tx.send(WorkerCmd::SyncPhoneMessages {
+                        threads,
+                        send_phone_prompt: true,
+                    });
+                }
+                self.show_toast("📲 Đang yêu cầu đồng bộ tin nhắn từ điện thoại…");
+                ctx.request_repaint();
             }
-            self.show_toast("📲 Đang yêu cầu đồng bộ tin nhắn từ điện thoại…");
-            ctx.request_repaint();
         }
         if apply_proxy_now {
             let proxy_url = self.settings.proxy_url.trim().to_string();

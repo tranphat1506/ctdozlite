@@ -105,7 +105,7 @@ pub fn extract_http_urls(text: &str) -> Vec<String> {
                 c.is_whitespace()
                     || matches!(
                         c,
-                        '"' | '\'' | '<' | '>' | '`' | '{' | '}' | '[' | ']' | '\\' | '\0'
+                        '"' | '<' | '>' | '`' | '{' | '}' | '[' | ']' | '\\' | '\0'
                     )
             })
             .unwrap_or(url_slice.len());
@@ -162,14 +162,35 @@ pub fn extract_filename_and_ext(url_or_name: &str) -> (String, String) {
     (name, ext)
 }
 
-/// Classify a URL + message context into Photos, Files, or Links.
-pub fn classify_url_kind(url: &str, text_hint: &str, msg_type: &str) -> MediaKind {
+/// Return `true` when a message or URL represents a Zalo voice note (`chat.voice` / `.amr` / `voice-talk`),
+/// which must NOT appear in the Documents (`Tài liệu`) or Links tab.
+pub fn is_voice_media(url: &str, text_hint: &str, msg_type: &str) -> bool {
+    if msg_type == "chat.voice" || text_hint.trim_start().starts_with("[Tin nhắn thoại]") {
+        return true;
+    }
+    let lower_url = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .to_ascii_lowercase();
+    let lower_txt = text_hint.trim().to_ascii_lowercase();
+    lower_url.contains("voice-talk.zdn.vn")
+        || lower_url.ends_with(".amr")
+        || lower_txt.ends_with(".amr")
+}
+
+/// Classify a URL + message context into Photos, Files, or Links matching Zalo's official types.
+/// Returns `None` for voice notes, stickers, or non-shareable local/internal URLs.
+pub fn classify_url_kind(url: &str, text_hint: &str, msg_type: &str) -> Option<MediaKind> {
+    if is_voice_media(url, text_hint, msg_type) || msg_type == "chat.sticker" {
+        return None;
+    }
     let trimmed = text_hint.trim_start();
     if msg_type == "chat.photo" || trimmed.starts_with("[Hình ảnh]") {
-        return MediaKind::Photos;
+        return Some(MediaKind::Photos);
     }
     if msg_type == "chat.file" || msg_type == "chat.video" || trimmed.starts_with("[Tập tin]") {
-        return MediaKind::Files;
+        return Some(MediaKind::Files);
     }
 
     let path_lower = url
@@ -184,17 +205,8 @@ pub fn classify_url_kind(url: &str, text_hint: &str, msg_type: &str) -> MediaKin
     ];
     const FILE_EXTS: &[&str] = &[
         ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".zip", ".rar", ".7z", ".tar",
-        ".gz", ".amr", ".mp3", ".m4a", ".wav", ".ogg", ".mp4", ".mov", ".mkv", ".apk", ".txt",
-        ".csv", ".kbql", ".json", ".xml", ".sql",
+        ".gz", ".mp4", ".mov", ".mkv", ".apk", ".txt", ".csv", ".kbql", ".json", ".xml", ".sql",
     ];
-
-    if FILE_EXTS.iter().any(|ext| path_lower.ends_with(ext))
-        || domain.contains("-zfcloud.zdn.vn")
-        || domain.contains("-voice-talk.zdn.vn")
-        || domain.contains("dlmd.me")
-    {
-        return MediaKind::Files;
-    }
 
     if PHOTO_EXTS.iter().any(|ext| path_lower.ends_with(ext))
         || domain.contains("-zpc.zdn.vn")
@@ -202,18 +214,42 @@ pub fn classify_url_kind(url: &str, text_hint: &str, msg_type: &str) -> MediaKin
         || domain.contains("-zpcloud.zdn.vn")
         || domain.contains("photo-stal")
         || domain.contains("zalo-gif.zadn.vn")
+        || domain.contains("z-cdn.me")
     {
-        return MediaKind::Photos;
+        return Some(MediaKind::Photos);
     }
 
-    MediaKind::Links
+    if FILE_EXTS.iter().any(|ext| path_lower.ends_with(ext))
+        || domain.contains("-zfcloud.zdn.vn")
+        || domain.contains("dlmd.me")
+    {
+        return Some(MediaKind::Files);
+    }
+
+    if domain == "localhost"
+        || domain == "127.0.0.1"
+        || domain.ends_with(".zdn.vn")
+        || domain.ends_with(".zadn.vn")
+        || domain.ends_with(".z-cdn.me")
+    {
+        return None;
+    }
+
+    Some(MediaKind::Links)
 }
 
 /// Derive `(msg_type, raw_json)` metadata from plain message text when `raw_json` is absent.
 pub fn build_media_meta_from_text(text: &str, current_msg_type: &str) -> Option<(String, String)> {
     let urls = extract_http_urls(text);
     let url = urls.into_iter().next()?;
-    let kind = classify_url_kind(&url, text, current_msg_type);
+    if is_voice_media(&url, text, current_msg_type) {
+        let meta = serde_json::json!({
+            "link_src": "Tin nhắn thoại",
+            "link_url": url,
+        });
+        return Some(("chat.voice".to_string(), meta.to_string()));
+    }
+    let kind = classify_url_kind(&url, text, current_msg_type)?;
 
     match kind {
         MediaKind::Photos => {
@@ -434,6 +470,51 @@ impl MessageStore {
                     }
                 }
                 let _ = tx.execute("PRAGMA user_version = 3", []);
+                let _ = tx.commit();
+            }
+        }
+
+        // Migration 4: re-classify voice notes (`.amr` / `voice-talk`) out of `chat.file` into
+        // `chat.voice`, re-extract Tenor GIFs (`z-cdn.me`) with single-quotes into `chat.photo`,
+        // and clean internal/localhost URLs mistakenly tagged as `chat.link`.
+        if conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))? < 4 {
+            let mut updates: Vec<(String, String, String)> = Vec::new();
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT msg_id, text, msg_type FROM messages
+                 WHERE text LIKE '%voice-talk.zdn.vn%'
+                    OR text LIKE '%.amr%'
+                    OR text LIKE '%z-cdn.me%'
+                    OR text LIKE '%localhost%'
+                    OR raw_json LIKE '%voice-talk.zdn.vn%'
+                    OR raw_json LIKE '%.amr%'",
+            ) {
+                if let Ok(rows) = stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1).unwrap_or_default(),
+                        row.get::<_, String>(2).unwrap_or_default(),
+                    ))
+                }) {
+                    for (msg_id, text, msg_type) in rows.flatten() {
+                        if let Some((new_type, new_json)) =
+                            build_media_meta_from_text(&text, &msg_type)
+                        {
+                            updates.push((new_type, new_json, msg_id));
+                        } else if text.contains("localhost") {
+                            updates.push(("webchat".to_string(), String::new(), msg_id));
+                        }
+                    }
+                }
+            }
+            if let Ok(tx) = conn.transaction() {
+                if let Ok(mut upd) =
+                    tx.prepare("UPDATE messages SET msg_type = ?1, raw_json = ?2 WHERE msg_id = ?3")
+                {
+                    for (new_type, new_json, msg_id) in updates {
+                        let _ = upd.execute(params![new_type, new_json, msg_id]);
+                    }
+                }
+                let _ = tx.execute("PRAGMA user_version = 4", []);
                 let _ = tx.commit();
             }
         }
@@ -795,6 +876,12 @@ impl MessageStore {
 
             let trimmed = text.trim();
             let effective_url = link_url.as_deref().or(link_thumb.as_deref()).unwrap_or("");
+
+            // Voice notes and stickers do not belong in the Photos/Files/Links drawer
+            if is_voice_media(effective_url, &text, &msg_type) || msg_type == "chat.sticker" {
+                continue;
+            }
+
             let inferred_kind = if link_src.as_deref() == Some("Hình ảnh Zalo")
                 || msg_type == "chat.photo"
                 || trimmed == "[Hình ảnh]"
@@ -808,7 +895,10 @@ impl MessageStore {
             {
                 MediaKind::Files
             } else if !effective_url.is_empty() {
-                classify_url_kind(effective_url, &text, &msg_type)
+                match classify_url_kind(effective_url, &text, &msg_type) {
+                    Some(k) => k,
+                    None => continue,
+                }
             } else {
                 continue;
             };
@@ -869,6 +959,15 @@ impl MessageStore {
                 MediaKind::Links => {
                     if let Some(url) = link_url.filter(|u| u.starts_with("http")) {
                         let domain = extract_domain_from_url(&url);
+                        let dom_low = domain.to_ascii_lowercase();
+                        if dom_low == "localhost"
+                            || dom_low == "127.0.0.1"
+                            || dom_low.ends_with(".zdn.vn")
+                            || dom_low.ends_with(".zadn.vn")
+                            || dom_low.ends_with(".z-cdn.me")
+                        {
+                            continue;
+                        }
                         let title = link_title.filter(|s| !s.is_empty()).unwrap_or_else(|| {
                             let clean = trimmed.strip_prefix("[Link]").unwrap_or(trimmed).trim();
                             let first_line = clean.lines().next().unwrap_or(clean).trim();
@@ -2533,18 +2632,47 @@ mod tests {
             raw_json: "".into(),
         };
 
+        let v1 = StoredMessage {
+            msg_id: "voice1".into(),
+            thread_id: thread_id.into(),
+            sender_id: "u1".into(),
+            sender_name: "User".into(),
+            text: "https://f1-voice-talk.zdn.vn/626355/8b4d2f03461daa43f30c.amr".into(),
+            msg_type: "webchat".into(),
+            ts: 350,
+            is_outgoing: false,
+            raw_json: "".into(),
+        };
+        let gif1 = StoredMessage {
+            msg_id: "gif1".into(),
+            thread_id: thread_id.into(),
+            sender_id: "u1".into(),
+            sender_name: "User".into(),
+            text: "https://media-ten.z-cdn.me/frUZ4oqT8DEAAAAM/i'm-so-excited-gif.gif".into(),
+            msg_type: "webchat".into(),
+            ts: 400,
+            is_outgoing: false,
+            raw_json: "".into(),
+        };
+
         store.upsert_message(&p1).unwrap();
         store.upsert_message(&f1).unwrap();
         store.upsert_message(&l1).unwrap();
+        store.upsert_message(&v1).unwrap();
+        store.upsert_message(&gif1).unwrap();
 
         let page = store
             .conversation_media_page(thread_id, MediaKind::Photos, 0, 10)
             .unwrap();
-        assert_eq!(page.total_photos, 1);
+        assert_eq!(page.total_photos, 2);
         assert_eq!(page.total_files, 1);
         assert_eq!(page.total_links, 1);
         assert_eq!(
             page.photos[0].thumb_url,
+            "https://media-ten.z-cdn.me/frUZ4oqT8DEAAAAM/i'm-so-excited-gif.gif"
+        );
+        assert_eq!(
+            page.photos[1].thumb_url,
             "https://f15-zpc.zdn.vn/jpg/123/abc.jpg"
         );
         assert_eq!(page.files[0].file_name, "bao_cao_do_an.docx");

@@ -626,6 +626,7 @@ pub struct ZaloGuiApp {
     sticker_textures: HashMap<String, TextureHandle>,
     sticker_texture_order: std::collections::VecDeque<String>,
     loading_stickers: HashSet<String>,
+    failed_media_keys: HashSet<String>,
     emoji_textures: HashMap<String, TextureHandle>,
     app_logo_texture: Option<TextureHandle>,
     sticker_store_packs: Vec<crate::chat::StickerPackInfo>,
@@ -1002,6 +1003,7 @@ impl ZaloGuiApp {
             sticker_textures: HashMap::new(),
             sticker_texture_order: std::collections::VecDeque::new(),
             loading_stickers: HashSet::new(),
+            failed_media_keys: HashSet::new(),
             emoji_textures: load_default_emoji_textures(&cc.egui_ctx),
             app_logo_texture: load_app_logo_texture(&cc.egui_ctx),
             sticker_store_packs: Vec::new(),
@@ -1794,6 +1796,7 @@ impl ZaloGuiApp {
                 }
                 GuiEvent::StickerImageReady { key, image } => {
                     self.loading_stickers.remove(&key);
+                    self.failed_media_keys.remove(&key);
                     const MAX_TEXTURE_CACHE: usize = 250;
                     if self.sticker_textures.len() >= MAX_TEXTURE_CACHE {
                         // Evict oldest texture that is not a permanent call stream or logo
@@ -1815,6 +1818,7 @@ impl ZaloGuiApp {
                     // broken URL (404, expired link, undecodable format) re-fetch on *every*
                     // frame — one HTTP request per repaint per broken image. The image viewer
                     // still offers a manual retry through its own `hd_` texture.
+                    self.failed_media_keys.insert(key.clone());
                     self.loading_stickers.insert(key);
                     self.status_msg =
                         "Không tải được một hình ảnh (định dạng lạ hoặc liên kết đã hết hạn)"
