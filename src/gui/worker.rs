@@ -2073,10 +2073,11 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: GuiTx, egui_ctx: eg
                                     let mut t_list = vec![t];
                                     let uin = s.login.as_ref().map(|l| l.uin.as_str()).unwrap_or_default();
                                     let db_path = crate::store::db_path_for_account(uin);
+                                    let load_limit = if have == 0 { 50 } else { (have + 150).min(5000) };
                                     crate::store::load_history_into_threads(
                                         &db_path,
                                         &mut t_list,
-                                        (have + 300).max(500),
+                                        load_limit,
                                     );
                                     let Some(mut t) =
                                         t_list.into_iter().find(|x| x.id == group_id)

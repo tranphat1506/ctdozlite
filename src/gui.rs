@@ -708,6 +708,7 @@ pub struct ZaloGuiApp {
     phone_sync_status: String,
     last_typing_sent_at: Option<(String, std::time::Instant)>,
     last_synced_icon_unread: Option<usize>,
+    info_drawer_tab: DrawerMediaTab,
 
     // Background channels
     event_rx: Receiver<GuiEvent>,
@@ -720,6 +721,14 @@ pub struct ZaloGuiApp {
     ime_just_committed: bool,
     history_reached_start: HashSet<String>,
     force_scroll_to_bottom: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum DrawerMediaTab {
+    #[default]
+    Photos,
+    Files,
+    Links,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -963,6 +972,7 @@ impl ZaloGuiApp {
             phone_sync_status: String::new(),
             last_typing_sent_at: None,
             last_synced_icon_unread: None,
+            info_drawer_tab: DrawerMediaTab::Photos,
             event_rx: rx,
             event_tx: tx.clone(),
             chat_render_window: (String::new(), CHAT_RENDER_STEP),

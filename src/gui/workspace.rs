@@ -1938,42 +1938,41 @@ impl ZaloGuiApp {
 
         if show_info_drawer {
             if let Some((ref d_id, ref d_name, ref d_ava, d_is_group, d_msg_count)) = thread_meta {
-                let shared_photos: Vec<(String, String, String, String)> = self
+                let (shared_photos, shared_files, shared_links) = self
                     .threads
                     .get(self.selected_thread_index)
                     .map(|t| {
-                        t.messages
-                            .iter()
-                            .rev()
-                            .filter_map(|m| {
-                                let is_photo = m.link_src.as_deref() == Some("Hình ảnh Zalo")
-                                    || m.text.trim() == "[Hình ảnh]"
-                                    || m.text.trim().starts_with("[Hình ảnh] ");
-                                if is_sticker_message(m).is_some() {
-                                    return None;
+                        let mut photos = Vec::new();
+                        let mut files = Vec::new();
+                        let mut links = Vec::new();
+                        for m in t.messages.iter().rev() {
+                            let is_sticker = is_sticker_message(m).is_some();
+                            if is_sticker {
+                                continue;
+                            }
+                            let is_photo = m.link_src.as_deref() == Some("Hình ảnh Zalo")
+                                || m.text.trim() == "[Hình ảnh]"
+                                || m.text.trim().starts_with("[Hình ảnh] ");
+                            let is_file = m.text.trim().starts_with("[Tập tin] ")
+                                || m.link_src.as_deref() == Some("Tập tin Zalo")
+                                || is_zalo_file_or_video_message(m);
+                            if is_photo && photos.len() < 24 {
+                                if let Some(thumb) = m.link_thumb.as_deref().or(m.link_url.as_deref()).filter(|u| !u.is_empty()) {
+                                    let full = m.link_url.as_deref().unwrap_or(thumb).to_string();
+                                    let title = m.link_title.clone().unwrap_or_else(|| "Hình ảnh".into());
+                                    photos.push((format!("thumb_{}", crate::crypto::md5_hex(thumb)), thumb.to_string(), full, title));
                                 }
-                                if !is_photo {
-                                    return None;
+                            } else if is_file && files.len() < 20 {
+                                let fname = m.text.strip_prefix("[Tập tin] ").unwrap_or(&m.text).trim().to_string();
+                                files.push((fname, m.time.clone(), m.link_url.clone().unwrap_or_default()));
+                            } else if let Some(ref url) = m.link_url {
+                                if !url.is_empty() && !is_photo && !is_file && links.len() < 20 {
+                                    let ltitle = m.link_title.clone().unwrap_or_else(|| url.clone());
+                                    links.push((ltitle, url.clone()));
                                 }
-                                let thumb = m
-                                    .link_thumb
-                                    .as_deref()
-                                    .or(m.link_url.as_deref())
-                                    .filter(|u| !u.is_empty())?;
-                                let full = m.link_url.as_deref().unwrap_or(thumb).to_string();
-                                let title = m
-                                    .link_title
-                                    .clone()
-                                    .unwrap_or_else(|| "Hình ảnh đã chia sẻ".into());
-                                Some((
-                                    format!("thumb_{}", crate::crypto::md5_hex(thumb)),
-                                    thumb.to_string(),
-                                    full,
-                                    title,
-                                ))
-                            })
-                            .take(9)
-                            .collect()
+                            }
+                        }
+                        (photos, files, links)
                     })
                     .unwrap_or_default();
 
@@ -2379,104 +2378,129 @@ impl ZaloGuiApp {
                             ui.add(egui::Separator::default().spacing(1.0));
                         }
 
-                        // Shared Media Grid (`Ảnh / Video đã chia sẻ`)
+                        // Media Hub: Tabs for Photos, Files, Links
                         egui::Frame::none()
-                            .inner_margin(Margin::symmetric(16.0, 14.0))
+                            .inner_margin(Margin::symmetric(16.0, 10.0))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
-                                    ui.label(
-                                        RichText::new("Ảnh / Video đã chia sẻ")
-                                            .size(12.5)
-                                            .color(pal.text_primary)
-                                            .strong(),
-                                    );
-                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        ui.label(
-                                            RichText::new(format!("({})", shared_photos.len()))
-                                                .size(11.5)
-                                                .color(pal.primary_hover),
-                                        );
-                                    });
+                                    let btn_w = (ui.available_width() - 12.0) / 3.0;
+                                    for (tab, title, count) in [
+                                        (crate::gui::DrawerMediaTab::Photos, "Ảnh", shared_photos.len()),
+                                        (crate::gui::DrawerMediaTab::Files, "Tài liệu", shared_files.len()),
+                                        (crate::gui::DrawerMediaTab::Links, "Link", shared_links.len()),
+                                    ] {
+                                        let active = self.info_drawer_tab == tab;
+                                        let btn = egui::Button::new(
+                                            RichText::new(format!("{title} ({count})"))
+                                                .size(11.2)
+                                                .color(if active { Color32::WHITE } else { pal.text_secondary })
+                                                .strong(),
+                                        )
+                                        .fill(if active { pal.primary } else { pal.bg_input })
+                                        .rounding(Rounding::same(6.0))
+                                        .min_size(Vec2::new(btn_w, 24.0));
+                                        if ui.add(btn).clicked() {
+                                            self.info_drawer_tab = tab;
+                                        }
+                                    }
                                 });
                                 ui.add_space(8.0);
 
-                                if shared_photos.is_empty() {
-                                    ui.label(
-                                        RichText::new("Chưa có ảnh hoặc video chia sẻ.")
-                                            .size(11.5)
-                                            .color(pal.text_muted),
-                                    );
-                                } else {
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-                                        for (tkey, thumb_u, full_u, ptitle) in &shared_photos {
-                                            if !self.sticker_textures.contains_key(tkey)
-                                                && self.loading_stickers.insert(tkey.clone())
-                                            {
-                                                if let Some(tx) = WORKER_TX.get() {
-                                                    let _ = tx.send(WorkerCmd::FetchStickerImage {
-                                                        key: tkey.clone(),
-                                                        url: thumb_u.clone(),
-                                                    });
-                                                }
-                                            }
-                                            let (cell_r, cell_resp) = ui.allocate_exact_size(
-                                                Vec2::splat(74.0),
-                                                Sense::click(),
-                                            );
-                                            ui.painter().rect_filled(
-                                                cell_r,
-                                                Rounding::same(8.0),
-                                                pal.bg_elevated,
-                                            );
-                                            if let Some(tex) = self.sticker_textures.get(tkey) {
-                                                ui.painter().image(
-                                                    tex.id(),
-                                                    cell_r,
-                                                    Rect::from_min_max(
-                                                        Pos2::ZERO,
-                                                        Pos2::new(1.0, 1.0),
-                                                    ),
-                                                    Color32::WHITE,
-                                                );
-                                            } else {
-                                                draw_icon_image(
-                                                    ui.painter(),
-                                                    cell_r.center(),
-                                                    20.0,
-                                                    pal.text_muted,
-                                                );
-                                            }
-                                            ui.painter().rect_stroke(
-                                                cell_r,
-                                                Rounding::same(8.0),
-                                                Stroke::new(
-                                                    1.0_f32,
-                                                    if cell_resp.hovered() {
-                                                        pal.primary
+                                match self.info_drawer_tab {
+                                    crate::gui::DrawerMediaTab::Photos => {
+                                        if shared_photos.is_empty() {
+                                            ui.label(RichText::new("Chưa có ảnh hoặc video chia sẻ.").size(11.5).color(pal.text_muted));
+                                        } else {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+                                                for (tkey, thumb_u, full_u, ptitle) in &shared_photos {
+                                                    if !self.sticker_textures.contains_key(tkey)
+                                                        && self.loading_stickers.insert(tkey.clone())
+                                                    {
+                                                        if let Some(tx) = WORKER_TX.get() {
+                                                            let _ = tx.send(WorkerCmd::FetchStickerImage {
+                                                                key: tkey.clone(),
+                                                                url: thumb_u.clone(),
+                                                            });
+                                                        }
+                                                    }
+                                                    let (cell_r, cell_resp) = ui.allocate_exact_size(Vec2::splat(74.0), Sense::click());
+                                                    ui.painter().rect_filled(cell_r, Rounding::same(8.0), pal.bg_elevated);
+                                                    if let Some(tex) = self.sticker_textures.get(tkey) {
+                                                        ui.painter().image(
+                                                            tex.id(),
+                                                            cell_r,
+                                                            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                                                            Color32::WHITE,
+                                                        );
                                                     } else {
-                                                        pal.border
-                                                    },
-                                                ),
-                                            );
-                                            if cell_resp
-                                                .on_hover_cursor(CursorIcon::PointingHand)
-                                                .on_hover_text("Xem ảnh phóng to")
-                                                .clicked()
-                                            {
-                                                self.image_viewer = Some(ImageViewerModal {
-                                                    tex_key: tkey.clone(),
-                                                    hd_tex_key: self.request_hd_texture(full_u),
-                                                    full_url: full_u.clone(),
-                                                    title: ptitle.clone(),
-                                                    sender: d_name.clone(),
-                                                    time: String::new(),
-                                                    zoom: 1.0,
-                                                    pan: Vec2::ZERO,
-                                                });
-                                            }
+                                                        draw_icon_image(ui.painter(), cell_r.center(), 20.0, pal.text_muted);
+                                                    }
+                                                    ui.painter().rect_stroke(
+                                                        cell_r,
+                                                        Rounding::same(8.0),
+                                                        Stroke::new(1.0_f32, if cell_resp.hovered() { pal.primary } else { pal.border }),
+                                                    );
+                                                    if cell_resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Xem ảnh phóng to").clicked() {
+                                                        self.image_viewer = Some(ImageViewerModal {
+                                                            tex_key: tkey.clone(),
+                                                            hd_tex_key: self.request_hd_texture(full_u),
+                                                            full_url: full_u.clone(),
+                                                            title: ptitle.clone(),
+                                                            sender: d_name.clone(),
+                                                            time: String::new(),
+                                                            zoom: 1.0,
+                                                            pan: Vec2::ZERO,
+                                                        });
+                                                    }
+                                                }
+                                            });
                                         }
-                                    });
+                                    }
+                                    crate::gui::DrawerMediaTab::Files => {
+                                        if shared_files.is_empty() {
+                                            ui.label(RichText::new("Chưa có tài liệu/file nào.").size(11.5).color(pal.text_muted));
+                                        } else {
+                                            ui.vertical(|ui| {
+                                                for (fname, ftime, furl) in &shared_files {
+                                                    let row_resp = ui.horizontal(|ui| {
+                                                        ui.label(RichText::new("📄").size(14.0));
+                                                        ui.vertical(|ui| {
+                                                            ui.label(RichText::new(truncate_chars(fname, 22)).size(12.0).color(pal.text_primary).strong());
+                                                            ui.label(RichText::new(ftime).size(10.5).color(pal.text_muted));
+                                                        });
+                                                    }).response;
+                                                    if row_resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(format!("Mở file: {fname}")).clicked() {
+                                                        if !furl.is_empty() {
+                                                            open_external_url(furl);
+                                                        }
+                                                    }
+                                                    ui.add_space(4.0);
+                                                }
+                                            });
+                                        }
+                                    }
+                                    crate::gui::DrawerMediaTab::Links => {
+                                        if shared_links.is_empty() {
+                                            ui.label(RichText::new("Chưa có liên kết chia sẻ.").size(11.5).color(pal.text_muted));
+                                        } else {
+                                            ui.vertical(|ui| {
+                                                for (ltitle, lurl) in &shared_links {
+                                                    let row_resp = ui.horizontal(|ui| {
+                                                        ui.label(RichText::new("🔗").size(13.0));
+                                                        ui.vertical(|ui| {
+                                                            ui.label(RichText::new(truncate_chars(ltitle, 22)).size(12.0).color(pal.primary_hover).strong());
+                                                            ui.label(RichText::new(truncate_chars(lurl, 26)).size(10.5).color(pal.text_muted));
+                                                        });
+                                                    }).response;
+                                                    if row_resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(lurl).clicked() {
+                                                        open_external_url(lurl);
+                                                    }
+                                                    ui.add_space(4.0);
+                                                }
+                                            });
+                                        }
+                                    }
                                 }
                             });
 

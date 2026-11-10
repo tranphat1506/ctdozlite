@@ -383,6 +383,41 @@ impl MessageStore {
         Ok(list)
     }
 
+    /// Retrieve older `limit` messages for a thread strictly before `before_ts`, ordered oldest-first.
+    pub fn messages_before(&self, thread_id: &str, before_ts: i64, limit: usize) -> Result<Vec<StoredMessage>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT msg_id, thread_id, sender_id, sender_name, text, msg_type, ts, is_outgoing, raw_json
+             FROM (
+                 SELECT msg_id, thread_id, sender_id, sender_name, text, msg_type, ts, is_outgoing, raw_json
+                 FROM messages
+                 WHERE thread_id = ?1 AND ts < ?2
+                 ORDER BY ts DESC
+                 LIMIT ?3
+             ) ORDER BY ts ASC",
+        )?;
+
+        let rows = stmt.query_map(params![thread_id, before_ts, limit as i64], |row| {
+            let is_outgoing_num: i64 = row.get(7)?;
+            Ok(StoredMessage {
+                msg_id: row.get(0)?,
+                thread_id: row.get(1)?,
+                sender_id: row.get(2).unwrap_or_default(),
+                sender_name: row.get(3).unwrap_or_default(),
+                text: row.get(4).unwrap_or_default(),
+                msg_type: row.get(5).unwrap_or_default(),
+                ts: row.get(6)?,
+                is_outgoing: is_outgoing_num != 0,
+                raw_json: row.get(8).unwrap_or_default(),
+            })
+        })?;
+
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+        Ok(list)
+    }
+
     /// Retrieve all persisted thread metadata ordered by `last_ts` descending.
     pub fn all_threads(&self) -> Result<Vec<StoredThread>> {
         let has_read_col = self
